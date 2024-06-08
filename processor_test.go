@@ -1,6 +1,7 @@
 package jorb
 
 import (
+	"log"
 	"testing"
 )
 
@@ -13,12 +14,10 @@ type MyJobContext struct {
 
 // MyOverallContext any non-job specific state that is important for the overall run
 type MyOverallContext struct {
-
 }
 
 // MyAppContext is all of my application processing, clients, etc reference for the job processors
 type MyAppContext struct {
-
 }
 
 const (
@@ -36,6 +35,7 @@ func TestProcessorOneJob(t *testing.T) {
 	}
 
 	newFunc := func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+		log.Println("Updating Job")
 		jc.Count += 1
 		return jc, STATE_DONE, nil
 	}
@@ -43,16 +43,15 @@ func TestProcessorOneJob(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: &newFunc,
-			Terminal: false,
+			Exec:         &newFunc,
+			Terminal:     false,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: nil,
-			Terminal: false,
+			Exec:         nil,
+			Terminal:     false,
 		},
 	}
-
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
 	p.Exec(r)
