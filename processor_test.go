@@ -3,6 +3,9 @@ package jorb
 import (
 	"log"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // import "github.com/stretchr/testify/assert"
@@ -28,7 +31,7 @@ func TestProcessorOneJob(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
 		})
@@ -37,6 +40,7 @@ func TestProcessorOneJob(t *testing.T) {
 	newFunc := func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
 		log.Println("Updating Job")
 		jc.Count += 1
+		time.Sleep(time.Second)
 		return jc, STATE_DONE, nil
 	}
 
@@ -54,10 +58,15 @@ func TestProcessorOneJob(t *testing.T) {
 	}
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+
+	start := time.Now()
 	p.Exec(r)
+	delta := time.Since(start)
+	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
 
 	for _, j := range r.Jobs {
 		if j.C.Count != 1 {
+			assert.Equal(t, 1, j.C.Count, "Job Count should be 1")
 			t.Errorf("Expected Job %s Count to be 1 but was %d", j.Id, j.C.Count)
 		}
 	}
