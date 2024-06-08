@@ -2,6 +2,7 @@ package jorb
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Job represents the current processing state of any job
@@ -58,5 +59,29 @@ func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC,OC,JC]) (*Pro
 	}
 }
 
-func (p *Processor[AC, OC, JC]) Exec(r *Run[OC,JC]) {
+func (p *Processor[AC, OC, JC]) Exec(r *Run[OC,JC]) error {
+	for {
+		didProcess := false
+		for _, j := range r.Jobs {
+			// Find the right executor
+			var exec *State[AC, OC, JC]
+			validStates := []string{}
+			for _, e := range p.States {
+				validStates = append(validStates, e.TriggerState)
+				if e.TriggerState == j.State {
+					exec = &e
+					break
+				}
+			}
+			if exec == nil {
+				return fmt.Errorf("Did not find a state executor for state [%s], please add it to the states of the processor. Valid states: [%s]", j.State, strings.Join(validStates, ","))
+			}
+
+			j, newState, _ := (*exec.Exec)(p.AppContext, r.Overall, j.C)
+			r.Jobs[j.Id] = newState.C
+		}
+		if didProcess == false {
+			break
+		}
+	}
 }
