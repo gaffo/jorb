@@ -68,7 +68,7 @@ func TestProcessorOneJob(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -117,7 +117,7 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -167,7 +167,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -182,6 +182,85 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	}
 	assert.GreaterOrEqual(t, stateCount[STATE_DONE_TWO], 4000)
 	assert.GreaterOrEqual(t, stateCount[STATE_DONE], 4000)
+}
+
+type testStatusListener struct {
+	t                *testing.T
+	cur              int
+	expectedStatuses [][]StatusCount
+}
+
+func (t *testStatusListener) StatusUpdate(status []StatusCount) {
+	t.t.Helper()
+	if t.cur >= len(t.expectedStatuses) {
+		t.t.Errorf("Unexpected status update: %v", status)
+		return
+	}
+	assert.Equal(t.t, t.expectedStatuses[t.cur], status)
+	t.cur++
+}
+
+func (t *testStatusListener) ExpectStatus(counts []StatusCount) {
+	t.expectedStatuses = append(t.expectedStatuses, counts)
+}
+
+var _ StatusListener = &testStatusListener{}
+
+func TestProcessor_StateCallback(t *testing.T) {
+	t.Parallel()
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 1; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+
+	tl := &testStatusListener{
+		t: t,
+	}
+	tl.ExpectStatus([]StatusCount{
+		{
+			State: TRIGGER_STATE_NEW,
+			Count: 0,
+		},
+		{
+			State: STATE_DONE,
+			Count: 1,
+		},
+	})
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				//log.Println("Processing New")
+				jc.Count += 1
+				time.Sleep(time.Second)
+				return jc, STATE_DONE, nil, nil
+			},
+			Terminal:    false,
+			Concurrency: 10,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE,
+			Exec:         nil,
+			Terminal:     true,
+		},
+	}
+
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, tl)
+
+	start := time.Now()
+	err := p.Exec(context.Background(), r)
+	delta := time.Since(start)
+	require.NoError(t, err)
+	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, 1, j.C.Count, "Job Count should be 1")
+	}
 }
 
 func TestProcessor_Retries(t *testing.T) {
@@ -241,7 +320,7 @@ func TestProcessor_RateLimiter(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -293,7 +372,7 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -347,7 +426,7 @@ func TestProcessor_Serialization(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer, nil)
 
 	start := time.Now()
 	err = p.Exec(context.Background(), r)
@@ -465,7 +544,7 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)

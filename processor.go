@@ -126,12 +126,22 @@ type KickRequest[JC any] struct {
 	State string
 }
 
-// Processor executes a job
-type Processor[AC any, OC any, JC any] struct {
-	AppContext AC
-	States     []State[AC, OC, JC]
-	Serializer Serializer[OC, JC]
+type StatusCount struct {
+	State string
+	Count int
 }
+
+type StatusListener interface {
+	StatusUpdate(status []StatusCount)
+}
+
+type NilStatusListener struct {
+}
+
+func (n NilStatusListener) StatusUpdate(status []StatusCount) {
+}
+
+var _ StatusListener = &NilStatusListener{}
 
 type NilSerializer[OC any, JC any] struct {
 }
@@ -144,14 +154,26 @@ func (n *NilSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
 	panic("not implemented, shouldn't be called")
 }
 
-func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC]) *Processor[AC, OC, JC] {
+// Processor executes a job
+type Processor[AC any, OC any, JC any] struct {
+	AppContext     AC
+	States         []State[AC, OC, JC]
+	Serializer     Serializer[OC, JC]
+	StatusListener StatusListener
+}
+
+func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) *Processor[AC, OC, JC] {
 	if serializer == nil {
 		serializer = &NilSerializer[OC, JC]{}
 	}
+	if statusListener == nil {
+		statusListener = &NilStatusListener{}
+	}
 	return &Processor[AC, OC, JC]{
-		AppContext: ac,
-		States:     states,
-		Serializer: serializer,
+		AppContext:     ac,
+		States:         states,
+		Serializer:     serializer,
+		StatusListener: statusListener,
 	}
 }
 
@@ -274,6 +296,20 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			if err != nil {
 				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
 			}
+
+			// Calculate state counts
+			statusCountMap := map[string]int{}
+			for _, j := range r.Jobs {
+				statusCountMap[j.State]++
+			}
+			statusCount := make([]StatusCount, 0, len(statusCountMap))
+			for _, state := range p.States {
+				statusCount = append(statusCount, StatusCount{
+					State: state.TriggerState,
+					Count: statusCountMap[state.TriggerState],
+				})
+			}
+			p.StatusListener.StatusUpdate(statusCount)
 
 			// Sent the job to the next state channel
 			nextState, ok := stateMap[j.State]
