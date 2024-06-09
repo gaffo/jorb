@@ -1,10 +1,13 @@
 package jorb
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
 	"sync"
+
+	"golang.org/x/time/rate"
 )
 
 // Job represents the current processing state of any job
@@ -49,6 +52,7 @@ type State[AC any, OC any, JC any] struct {
 	Exec         func(ac AC, oc OC, jc JC) (JC, string, error)
 	Terminal     bool
 	Concurrency  int
+	RateLimit    *rate.Limiter
 }
 
 // Processor executes a job
@@ -64,7 +68,7 @@ func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC]) *Pr
 	}
 }
 
-func (p *Processor[AC, OC, JC]) Exec(r *Run[OC, JC]) error {
+func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
 	// Make a map of triggers to states so we can easily reference it
 	stateMap := map[string]State[AC, OC, JC]{}
 	for _, s := range p.States {
@@ -102,6 +106,10 @@ func (p *Processor[AC, OC, JC]) Exec(r *Run[OC, JC]) error {
 			wg.Add(1) // add a waiter for every go processor, do it before forking
 			go func() {
 				for j := range x {
+					if s.RateLimit != nil {
+						s.RateLimit.Wait(ctx)
+					}
+					// Execute the job
 					j.C, j.State, _ = s.Exec(p.AppContext, r.Overall, j.C)
 					returnChan <- j
 				}
