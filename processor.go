@@ -52,7 +52,7 @@ const (
 
 type State[AC any, OC any, JC any] struct {
 	TriggerState string
-	Exec         func(ac AC, oc OC, jc JC) (JC, string, error)
+	Exec         func(ac AC, oc OC, jc JC) (JC, string, []KickRequest[JC], error)
 	Terminal     bool
 	Concurrency  int
 	RateLimit    *rate.Limiter
@@ -113,9 +113,12 @@ func (js *JsonSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
 	return run, nil
 }
 
-// NewState creates a new state
-
-// NewState creates a new state
+// KickRequest struct is a job context with a requested state that the
+// framework will expand into an actual job
+type KickRequest[JC any] struct {
+	C     JC
+	State string
+}
 
 // Processor executes a job
 type Processor[AC any, OC any, JC any] struct {
@@ -130,6 +133,11 @@ func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC]) *Pr
 	}
 }
 
+type Return[JC any] struct {
+	Job          Job[JC]
+	KickRequests []KickRequest[JC]
+}
+
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
 	// Make a map of triggers to states so we can easily reference it
 	stateMap := map[string]State[AC, OC, JC]{}
@@ -142,7 +150,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	}
 
 	// When a job changes state, we send it to this channel to centrally manage and re-queue
-	returnChan := make(chan Job[JC], 1000)
+	returnChan := make(chan Return[JC], 10_000)
 
 	// For each state, we need a channel of jobs
 	stateChan := map[string]chan Job[JC]{}
@@ -172,8 +180,11 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 						s.RateLimit.Wait(ctx)
 					}
 					// Execute the job
-					j.C, j.State, _ = s.Exec(p.AppContext, r.Overall, j.C)
-					returnChan <- j
+					rtn := Return[JC]{}
+					j.C, j.State, rtn.KickRequests, _ = s.Exec(p.AppContext, r.Overall, j.C)
+
+					rtn.Job = j
+					returnChan <- rtn
 				}
 				log.Printf("Processor [%s] worker done", s.TriggerState)
 				wg.Done()
@@ -184,19 +195,54 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	wg.Add(1)
 
 	// Now we gotta kick off all of the states to their correct queue
-	for _, job := range r.Jobs {
-		// If it's in a terminal state, skip
-		if stateMap[job.State].Terminal {
-			continue
+	{
+		// Lock on R
+		//mutR.Lock()
+		//defer mutR.Unlock()
+		for _, job := range r.Jobs {
+			// If it's in a terminal state, skip
+			if stateMap[job.State].Terminal {
+				continue
+			}
+			// Add the job to the state
+			stateChan[job.State] <- job
 		}
-		// Add the job to the state
-		stateChan[job.State] <- job
 	}
 
 	// Make a central processor and start it
 	go func() {
-		for j := range returnChan {
-			// Save the state
+		for rtn := range returnChan {
+			j := rtn.Job
+
+			// Send the new kicks if any
+			if rtn.KickRequests != nil {
+				for _, k := range rtn.KickRequests {
+					// Add the new job to the state
+					newJob := Job[JC]{
+						Id:    fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
+						C:     k.C,
+						State: k.State,
+					}
+					// Add it to r
+					r.Jobs[newJob.Id] = newJob
+
+					nextState, ok := stateMap[newJob.State]
+					if !ok {
+						stateNames := make([]string, 0, len(stateMap))
+						log.Fatalf("No state [%s] found in the state map, valid states, %s", newJob.State, strings.Join(stateNames, ", "))
+					}
+					// If it's terminal, we're done with this job
+					if !nextState.Terminal {
+						// We need to get the chan for the next one
+						nextChan := stateChan[nextState.TriggerState]
+						// Send the job to the next chan
+						nextChan <- newJob
+						continue
+					}
+				}
+			}
+
+			// Update the job
 			r.Jobs[j.Id] = j
 
 			// Sent the job to the next state channel
@@ -238,8 +284,6 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 
 	// Wait for all of the processors to quit
 	wg.Wait()
-	// close(returnChan)
-	// wgReturn.Wait()
 
 	return nil
 }

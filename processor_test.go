@@ -22,6 +22,7 @@ type MyJobContext struct {
 	Name       string
 	Count      int
 	StringList []string
+	String     string
 }
 
 // MyOverallContext any non-job specific state that is important for the overall run
@@ -52,11 +53,11 @@ func TestProcessorOneJob(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
-				return jc, STATE_DONE, nil
+				return jc, STATE_DONE, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
@@ -94,18 +95,18 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
-				return jc, STATE_MIDDLE, nil
+				return jc, STATE_MIDDLE, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
-				return jc, STATE_DONE, nil
+				return jc, STATE_DONE, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
@@ -143,14 +144,14 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				time.Sleep(time.Millisecond * time.Duration(rand.Intn(1000)))
 				jc.Count += 1
 				c := rand.Intn(2) == 0
 				if c {
-					return jc, STATE_DONE, nil
+					return jc, STATE_DONE, nil, nil
 				}
-				return jc, STATE_DONE_TWO, nil
+				return jc, STATE_DONE_TWO, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 1000,
@@ -214,10 +215,10 @@ func TestProcessor_RateLimiter(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				time.Sleep(time.Second)
-				return jc, STATE_MIDDLE, nil
+				return jc, STATE_MIDDLE, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
@@ -225,10 +226,10 @@ func TestProcessor_RateLimiter(t *testing.T) {
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				time.Sleep(time.Second)
-				return jc, STATE_DONE, nil
+				return jc, STATE_DONE, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
@@ -267,21 +268,21 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
-				return jc, STATE_MIDDLE, nil
+				return jc, STATE_MIDDLE, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				if jc.Count > 9 {
-					return jc, STATE_DONE, nil
+					return jc, STATE_DONE, nil, nil
 				}
-				return jc, TRIGGER_STATE_NEW, nil
+				return jc, TRIGGER_STATE_NEW, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
@@ -345,40 +346,67 @@ func TestJsonSerializer_SaveLoad(t *testing.T) {
 	assert.EqualValues(t, *run, actualRun)
 }
 
+const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+func randString(length int) string {
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[rand.Intn(len(charset))]
+	}
+	return string(b)
+}
+
 func TestProcessor_FirstStepExpands(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
 	for i := 0; i < 10; i++ {
-		r.AddJob(MyJobContext{
-			Count: 0,
-		})
+		jobContext := MyJobContext{
+			Count:      0,
+			StringList: []string{},
+		}
+		for i := 0; i < 10; i++ {
+			// Append a 30 length randomly generated string to jobContext.StringList
+			jobContext.StringList = append(jobContext.StringList, randString(30))
+		}
+		r.AddJob(jobContext)
 	}
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		// This state generates a list of job requests
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
-				jc.Count += 1
-				return jc, STATE_MIDDLE, nil
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				newJobs := []KickRequest[MyJobContext]{}
+				for _, state := range jc.StringList {
+					newJobs = append(newJobs, KickRequest[MyJobContext]{
+						C:     MyJobContext{String: state},
+						State: STATE_MIDDLE,
+					})
+				}
+
+				// This state will then finish itself
+				return jc, STATE_DONE, newJobs, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
-				jc.Count += 1
-				if jc.Count > 9 {
-					return jc, STATE_DONE, nil
-				}
-				return jc, TRIGGER_STATE_NEW, nil
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				jc.Count = len(jc.String)
+				return jc, STATE_DONE_TWO, nil, nil
 			},
 			Terminal:    false,
 			Concurrency: 10,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_DONE,
+			Exec:         nil,
+			Terminal:     true,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE_TWO,
 			Exec:         nil,
 			Terminal:     true,
 		},
@@ -392,7 +420,15 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
 
+	stateCount := map[string]int{}
 	for _, j := range r.Jobs {
-		assert.Equal(t, 10, j.C.Count, "Job Count should be 1")
+		stateCount[j.State] += 1
+		if j.State == STATE_DONE {
+			assert.Equal(t, 0, j.C.Count, "Job Count should be 1")
+			continue
+		}
+		assert.Equal(t, 30, j.C.Count, "Job Count should be 1")
 	}
+	assert.Equal(t, 10, stateCount[STATE_DONE])
+	assert.Equal(t, 10*10, stateCount[STATE_DONE_TWO])
 }
