@@ -2,8 +2,11 @@ package jorb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -54,6 +57,65 @@ type State[AC any, OC any, JC any] struct {
 	Concurrency  int
 	RateLimit    *rate.Limiter
 }
+
+// Serializer is an interface for job run seralization
+type Serializer[OC any, JC any] interface {
+	Serialize(run Run[OC, JC]) error
+	Deserialize() (Run[OC, JC], error)
+}
+
+// JsonSerializer is a struct that implements Serializer and stores and loads run from a file specified
+// in the File field, there  is a anonymous variable type check
+type JsonSerializer[OC any, JC any] struct {
+	File string
+}
+
+var _ Serializer[any, any] = (*JsonSerializer[any, any])(nil)
+
+func (js *JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
+	// Create the parent directory if it doesn't exist
+	dir := filepath.Dir(js.File)
+	err := os.MkdirAll(dir, 0600)
+	if err != nil {
+		return err
+	}
+
+	file, err := os.Create(js.File)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	err = encoder.Encode(run)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (js *JsonSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
+	file, err := os.Open(js.File)
+	if err != nil {
+		return Run[OC, JC]{}, err
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	var run Run[OC, JC]
+	err = decoder.Decode(&run)
+	if err != nil {
+		var zero Run[OC, JC]
+		return zero, err
+	}
+
+	return run, nil
+}
+
+// NewState creates a new state
+
+// NewState creates a new state
 
 // Processor executes a job
 type Processor[AC any, OC any, JC any] struct {

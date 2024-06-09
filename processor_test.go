@@ -2,8 +2,11 @@ package jorb
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,11 +19,14 @@ import (
 
 // JobContext represents my Job's context, eg the state of doing work
 type MyJobContext struct {
-	Count int
+	Name       string
+	Count      int
+	StringList []string
 }
 
 // MyOverallContext any non-job specific state that is important for the overall run
 type MyOverallContext struct {
+	Name string
 }
 
 // MyAppContext is all of my application processing, clients, etc reference for the job processors
@@ -305,12 +311,88 @@ func TestProcessor_DLQ(t *testing.T) {
 	t.Fail()
 }
 
-func TestProcessor_JsonSerialization(t *testing.T) {
+func TestJsonSerializer_SaveLoad(t *testing.T) {
 	t.Parallel()
-	t.Fail()
+	// Create a temporary directory for testing
+	tempDir, err := os.MkdirTemp("", "test")
+	if err != nil {
+		t.Fatalf("Failed to create temporary directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a test run
+	run := NewRun[MyOverallContext, MyJobContext]("test", MyOverallContext{Name: "overall"})
+	// Add 10 jobs with random data
+	for i := 0; i < 10; i++ {
+		job := MyJobContext{Count: 0, Name: fmt.Sprintf("job-%d", i)}
+		run.AddJob(job)
+	}
+
+	// Create a JsonSerializer with a temporary file
+	tempFile := filepath.Join(tempDir, "test.json")
+	serializer := &JsonSerializer[MyOverallContext, MyJobContext]{File: tempFile}
+
+	// Serialize the run
+	err = serializer.Serialize(*run)
+	require.NoError(t, err)
+
+	require.FileExists(t, tempFile)
+
+	actualRun, err := serializer.Deserialize()
+	require.NoError(t, err)
+
+	// Check that the run is the same
+	assert.EqualValues(t, *run, actualRun)
 }
 
 func TestProcessor_FirstStepExpands(t *testing.T) {
 	t.Parallel()
-	t.Fail()
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 10; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+				jc.Count += 1
+				return jc, STATE_MIDDLE, nil
+			},
+			Terminal:    false,
+			Concurrency: 10,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_MIDDLE,
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+				jc.Count += 1
+				if jc.Count > 9 {
+					return jc, STATE_DONE, nil
+				}
+				return jc, TRIGGER_STATE_NEW, nil
+			},
+			Terminal:    false,
+			Concurrency: 10,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE,
+			Exec:         nil,
+			Terminal:     true,
+		},
+	}
+
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+
+	start := time.Now()
+	err := p.Exec(context.Background(), r)
+	delta := time.Since(start)
+	require.NoError(t, err)
+	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, 10, j.C.Count, "Job Count should be 1")
+	}
 }
