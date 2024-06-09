@@ -250,7 +250,54 @@ func TestProcessor_RateLimiter(t *testing.T) {
 
 func TestProcessor_LoopWithExit(t *testing.T) {
 	t.Parallel()
-	t.Fail()
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 10; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+				jc.Count += 1
+				return jc, STATE_MIDDLE, nil
+			},
+			Terminal:    false,
+			Concurrency: 10,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_MIDDLE,
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
+				jc.Count += 1
+				if jc.Count > 9 {
+					return jc, STATE_DONE, nil
+				}
+				return jc, TRIGGER_STATE_NEW, nil
+			},
+			Terminal:    false,
+			Concurrency: 10,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE,
+			Exec:         nil,
+			Terminal:     true,
+		},
+	}
+
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+
+	start := time.Now()
+	err := p.Exec(context.Background(), r)
+	delta := time.Since(start)
+	require.NoError(t, err)
+	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, 10, j.C.Count, "Job Count should be 1")
+	}
 }
 
 func TestProcessor_DLQ(t *testing.T) {
@@ -259,6 +306,11 @@ func TestProcessor_DLQ(t *testing.T) {
 }
 
 func TestProcessor_JsonSerialization(t *testing.T) {
+	t.Parallel()
+	t.Fail()
+}
+
+func TestProcessor_FirstStepExpands(t *testing.T) {
 	t.Parallel()
 	t.Fail()
 }
