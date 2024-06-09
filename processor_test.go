@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // import "github.com/stretchr/testify/assert"
@@ -38,7 +39,7 @@ func TestProcessorOneJob(t *testing.T) {
 	}
 
 	newFunc := func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, error) {
-		log.Println("Updating Job")
+		log.Println("Processing New")
 		jc.Count += 1
 		time.Sleep(time.Second)
 		return jc, STATE_DONE, nil
@@ -49,19 +50,21 @@ func TestProcessorOneJob(t *testing.T) {
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec:         &newFunc,
 			Terminal:     false,
+			Concurrency:  10,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
-			TriggerState: TRIGGER_STATE_NEW,
+			TriggerState: STATE_DONE,
 			Exec:         nil,
-			Terminal:     false,
+			Terminal:     true,
 		},
 	}
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
 
 	start := time.Now()
-	p.Exec(r)
+	err := p.Exec(r)
 	delta := time.Since(start)
+	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
 
 	for _, j := range r.Jobs {
