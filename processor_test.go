@@ -69,7 +69,7 @@ func TestProcessorOneJob(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -118,7 +118,7 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -168,7 +168,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -242,7 +242,7 @@ func TestProcessor_RateLimiter(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -294,7 +294,7 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)
@@ -310,6 +310,60 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 func TestProcessor_DLQ(t *testing.T) {
 	t.Parallel()
 	t.Fail()
+}
+
+func TestProcessor_Serialization(t *testing.T) {
+	t.Parallel()
+
+	tempFile, err := os.CreateTemp("", "state-*.json.tmp")
+	require.NoError(t, err)
+	defer os.Remove(tempFile.Name())
+
+	serialzer := NewJsonSerializer[MyOverallContext, MyJobContext](tempFile.Name())
+
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 10; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				log.Println("Processing New")
+				jc.Count += 1
+				time.Sleep(time.Second)
+				return jc, STATE_DONE, nil, nil
+			},
+			Terminal:    false,
+			Concurrency: 10,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE,
+			Exec:         nil,
+			Terminal:     true,
+		},
+	}
+
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer)
+
+	start := time.Now()
+	err = p.Exec(context.Background(), r)
+	delta := time.Since(start)
+	require.NoError(t, err)
+	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, 1, j.C.Count, "Job Count should be 1")
+	}
+
+	// Now reload the job
+	actual, err := serialzer.Deserialize()
+	require.NoError(t, err)
+	assert.Equal(t, *r, actual)
 }
 
 func TestJsonSerializer_SaveLoad(t *testing.T) {
@@ -412,7 +466,7 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states)
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil)
 
 	start := time.Now()
 	err := p.Exec(context.Background(), r)

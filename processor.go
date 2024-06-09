@@ -60,7 +60,7 @@ type State[AC any, OC any, JC any] struct {
 
 // Serializer is an interface for job run seralization
 type Serializer[OC any, JC any] interface {
-	Serialize(run Run[OC, JC]) error
+	Serialize(r Run[OC, JC]) error
 	Deserialize() (Run[OC, JC], error)
 }
 
@@ -70,9 +70,15 @@ type JsonSerializer[OC any, JC any] struct {
 	File string
 }
 
+func NewJsonSerializer[OC any, JC any](file string) *JsonSerializer[OC, JC] {
+	return &JsonSerializer[OC, JC]{
+		File: file,
+	}
+}
+
 var _ Serializer[any, any] = (*JsonSerializer[any, any])(nil)
 
-func (js *JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
+func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 	// Create the parent directory if it doesn't exist
 	dir := filepath.Dir(js.File)
 	err := os.MkdirAll(dir, 0600)
@@ -95,7 +101,7 @@ func (js *JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 	return nil
 }
 
-func (js *JsonSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
+func (js JsonSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
 	file, err := os.Open(js.File)
 	if err != nil {
 		return Run[OC, JC]{}, err
@@ -124,15 +130,33 @@ type KickRequest[JC any] struct {
 type Processor[AC any, OC any, JC any] struct {
 	AppContext AC
 	States     []State[AC, OC, JC]
+	Serializer Serializer[OC, JC]
 }
 
-func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC]) *Processor[AC, OC, JC] {
+type NilSerializer[OC any, JC any] struct {
+}
+
+func (n *NilSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
+	return nil
+}
+
+func (n *NilSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
+	panic("not implemented, shouldn't be called")
+}
+
+func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC]) *Processor[AC, OC, JC] {
+	if serializer == nil {
+		serializer = &NilSerializer[OC, JC]{}
+	}
 	return &Processor[AC, OC, JC]{
 		AppContext: ac,
 		States:     states,
+		Serializer: serializer,
 	}
 }
 
+// Return is a struct that contains a job and a list of kick requests
+// that is used for returning job updates to the system
 type Return[JC any] struct {
 	Job          Job[JC]
 	KickRequests []KickRequest[JC]
@@ -244,6 +268,12 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 
 			// Update the job
 			r.Jobs[j.Id] = j
+
+			// Flush the state
+			err := p.Serializer.Serialize(*r)
+			if err != nil {
+				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
+			}
 
 			// Sent the job to the next state channel
 			nextState, ok := stateMap[j.State]
