@@ -15,19 +15,24 @@ import (
 
 // Job represents the current processing state of any job
 type Job[JC any] struct {
-	Id    string
-	C     JC
-	State string
+	Id    string // Id is a unique identifier for the job
+	C     JC     // C holds the job specific context
+	State string // State represents the current processing state of the job
 }
 
-// Run run manages state of the work a processor is doing
+// Run is basically the overall state of a given run (batch) in the processing framework
+// it's meant to be re-entrant, eg if you kill the processor and you have a serializaer, you can
+// restart using it at any time
 type Run[OC any, JC any] struct {
-	Name    string
-	Jobs    map[string]Job[JC]
-	Overall OC
+	Name    string             // Name of the run
+	Jobs    map[string]Job[JC] // Map of jobs, where keys are job ids and values are Job states
+	Overall OC                 // Overall overall state that is usful to all jobs, basically context for the overall batch
 }
 
 // NewRun creates a new Run instance with the given name and overall context
+//
+// Use the overall context to store any state that all of the jobs will want access to instead of
+// storing it in the specific JobContexts
 func NewRun[OC any, JC any](name string, oc OC) *Run[OC, JC] {
 	return &Run[OC, JC]{
 		Name:    name,
@@ -57,7 +62,7 @@ type State[AC any, OC any, JC any] struct {
 	// TriggerState is the string identifier for this state.
 	TriggerState string
 
-	// Exec is a function that executes the logic for this state.
+	// Exec is a function that executes the logic for jobs in this state.
 	// It takes the application context (AC), overall context (OC), and job context (JC) as input,
 	// and returns the updated job context (JC), the next state string,
 	// a slice of kick requests ([]KickRequest[JC]) for triggering other jobs,
@@ -71,7 +76,7 @@ type State[AC any, OC any, JC any] struct {
 	// Concurrency specifies the maximum number of concurrent executions allowed for this state.
 	Concurrency int
 
-	// RateLimit is an optional rate limiter for controlling the execution rate of this state.
+	// RateLimit is an optional rate limiter for controlling the execution rate of this state. Useful when calling rate limited apis.
 	RateLimit *rate.Limiter
 }
 
