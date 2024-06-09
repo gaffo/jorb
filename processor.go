@@ -46,7 +46,7 @@ const (
 
 type State[AC any, OC any, JC any] struct {
 	TriggerState string
-	Exec         *func(ac AC, oc OC, jc JC) (JC, string, error)
+	Exec         func(ac AC, oc OC, jc JC) (JC, string, error)
 	Terminal     bool
 	Concurrency  int
 }
@@ -102,7 +102,7 @@ func (p *Processor[AC, OC, JC]) Exec(r *Run[OC, JC]) error {
 			wg.Add(1) // add a waiter for every go processor, do it before forking
 			go func() {
 				for j := range x {
-					j.C, j.State, _ = (*s.Exec)(p.AppContext, r.Overall, j.C)
+					j.C, j.State, _ = s.Exec(p.AppContext, r.Overall, j.C)
 					returnChan <- j
 				}
 				log.Printf("Processor [%s] worker done", s.TriggerState)
@@ -112,6 +112,17 @@ func (p *Processor[AC, OC, JC]) Exec(r *Run[OC, JC]) error {
 	}
 	// wgReturn := sync.WaitGroup{}
 	wg.Add(1)
+
+	// Now we gotta kick off all of the states to their correct queue
+	for _, job := range r.Jobs {
+		// If it's in a terminal state, skip
+		if stateMap[job.State].Terminal {
+			continue
+		}
+		// Add the job to the state
+		stateChan[job.State] <- job
+	}
+
 	// Make a central processor and start it
 	go func() {
 		for j := range returnChan {
@@ -154,16 +165,6 @@ func (p *Processor[AC, OC, JC]) Exec(r *Run[OC, JC]) error {
 		}
 		wg.Done()
 	}()
-
-	// Now we gotta kick off all of the states to their correct queue
-	for _, job := range r.Jobs {
-		// If it's in a terminal state, skip
-		if stateMap[job.State].Terminal {
-			continue
-		}
-		// Add the job to the state
-		stateChan[job.State] <- job
-	}
 
 	// Wait for all of the processors to quit
 	wg.Wait()
