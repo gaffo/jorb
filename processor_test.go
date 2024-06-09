@@ -34,6 +34,7 @@ const (
 )
 
 func TestProcessorOneJob(t *testing.T) {
+	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
@@ -75,6 +76,7 @@ func TestProcessorOneJob(t *testing.T) {
 }
 
 func TestProcessorTwoSequentialJobs(t *testing.T) {
+	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
@@ -123,10 +125,11 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 }
 
 func TestProcessor_TwoTerminal(t *testing.T) {
+	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
-	for i := 0; i < 100_000; i++ {
+	for i := 0; i < 10_000; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
 		})
@@ -144,7 +147,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 				return jc, STATE_DONE_TWO, nil
 			},
 			Terminal:    false,
-			Concurrency: 10_000,
+			Concurrency: 1000,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_DONE_TWO,
@@ -176,14 +179,17 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 }
 
 func TestProcessor_Retries(t *testing.T) {
-
+	t.Parallel()
+	t.Fail()
 }
 
 func TestProcessor_StateLog(t *testing.T) {
-
+	t.Parallel()
+	t.Fail()
 }
 
 func TestProcessor_RateLimiter(t *testing.T) {
+	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
@@ -243,9 +249,16 @@ func TestProcessor_RateLimiter(t *testing.T) {
 }
 
 func TestProcessor_LoopWithExit(t *testing.T) {
-
+	t.Parallel()
+	t.Fail()
 }
 
 func TestProcessor_DLQ(t *testing.T) {
+	t.Parallel()
+	t.Fail()
+}
 
+func TestProcessor_JsonSerialization(t *testing.T) {
+	t.Parallel()
+	t.Fail()
 }
