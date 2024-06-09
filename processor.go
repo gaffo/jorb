@@ -210,7 +210,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 					rtn.Job = j
 					returnChan <- rtn
 				}
-				log.Printf("Processor [%s] worker done", s.TriggerState)
+				//log.Printf("Processor [%s] worker done", s.TriggerState)
 				wg.Done()
 			}()
 		}
@@ -300,7 +300,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			if !shutdown {
 				continue
 			}
-			log.Println("All jobs are terminal state, shutting down")
+			//log.Println("All jobs are terminal state, shutting down")
 			// close all of the channels
 			for _, c := range stateChan {
 				close(c)

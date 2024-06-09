@@ -3,7 +3,6 @@ package jorb
 import (
 	"context"
 	"fmt"
-	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -54,7 +53,7 @@ func TestProcessorOneJob(t *testing.T) {
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
-				log.Println("Processing New")
+				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
 				return jc, STATE_DONE, nil, nil
@@ -333,7 +332,7 @@ func TestProcessor_Serialization(t *testing.T) {
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
-				log.Println("Processing New")
+				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
 				return jc, STATE_DONE, nil, nil
