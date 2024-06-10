@@ -193,8 +193,8 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			if p.stateMap[job.State].Terminal {
 				continue
 			}
-			// Add the job to the state
-			p.stateChan[job.State] <- job
+
+			p.sendJob(job)
 		}
 	}
 
@@ -264,7 +264,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 				if rtn.Error != nil {
 					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error)
 					// send it back to the state
-					p.stateChan[j.State] <- j
+					p.sendJob(j)
 					continue
 				}
 				// We need to get the chan for the next one
@@ -300,6 +300,10 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	wg.Wait()
 
 	return nil
+}
+
+func (p *Processor[AC, OC, JC]) sendJob(job Job[JC]) {
+	p.stateChan[job.State] <- job
 }
 
 func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], wg sync.WaitGroup) func() {
