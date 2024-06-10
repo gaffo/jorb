@@ -98,6 +98,10 @@ type Processor[AC any, OC any, JC any] struct {
 	serializer     Serializer[OC, JC]
 	statusListener StatusListener
 	initted        bool
+	stateMap       map[string]State[AC, OC, JC]
+	stateNames     []string
+	stateChan      map[string]chan Job[JC]
+	returnChan     chan Return[JC]
 }
 
 func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) *Processor[AC, OC, JC] {
@@ -127,25 +131,26 @@ func (p *Processor[AC, OC, JC]) init() {
 	if p.statusListener == nil {
 		p.statusListener = &NilStatusListener{}
 	}
+	// Make a map of triggers to states so we can easily reference it
+	p.stateMap = map[string]State[AC, OC, JC]{}
+	for _, s := range p.states {
+		p.stateMap[s.TriggerState] = s
+	}
+	// get a list of return state names for use
+	p.stateNames = make([]string, 0, len(p.stateMap))
+	for k := range p.stateMap {
+		p.stateNames = append(p.stateNames, k)
+	}
+
+	// When a job changes state, we send it to this channel to centrally manage and re-queue
+	p.returnChan = make(chan Return[JC], 10_000)
+
+	// For each state, we need a channel of jobs
+	p.stateChan = map[string]chan Job[JC]{}
 }
 
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
 	p.init()
-	// Make a map of triggers to states so we can easily reference it
-	stateMap := map[string]State[AC, OC, JC]{}
-	for _, s := range p.states {
-		stateMap[s.TriggerState] = s
-	}
-	stateNames := make([]string, 0, len(stateMap))
-	for k := range stateMap {
-		stateNames = append(stateNames, k)
-	}
-
-	// When a job changes state, we send it to this channel to centrally manage and re-queue
-	returnChan := make(chan Return[JC], 10_000)
-
-	// For each state, we need a channel of jobs
-	stateChan := map[string]chan Job[JC]{}
 
 	wg := sync.WaitGroup{}
 
@@ -155,14 +160,14 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			continue
 		}
 		if s.Exec == nil {
-			return fmt.Errorf("State [%s] has no executor, valid state names: %s", s.TriggerState, strings.Join(stateNames, ", "))
+			return p.invalidStateError(s.TriggerState)
 		}
 
 		concurrency := s.Concurrency
 
 		// Make a channel of that concurrency
 		x := make(chan Job[JC], len(r.Jobs))
-		stateChan[s.TriggerState] = x
+		p.stateChan[s.TriggerState] = x
 		// Make workers for each, they just process and fire back to the central channel
 		for i := 0; i < concurrency; i++ {
 			wg.Add(1) // add a waiter for every go processor, do it before forking
@@ -176,7 +181,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 					j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(p.appContext, r.Overall, j.C)
 
 					rtn.Job = j
-					returnChan <- rtn
+					p.returnChan <- rtn
 				}
 				//log.Printf("Processor [%s] worker done", s.TriggerState)
 				wg.Done()
@@ -193,17 +198,17 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 		//defer mutR.Unlock()
 		for _, job := range r.Jobs {
 			// If it's in a terminal state, skip
-			if stateMap[job.State].Terminal {
+			if p.stateMap[job.State].Terminal {
 				continue
 			}
 			// Add the job to the state
-			stateChan[job.State] <- job
+			p.stateChan[job.State] <- job
 		}
 	}
 
 	// Make a central processor and start it
 	go func() {
-		for rtn := range returnChan {
+		for rtn := range p.returnChan {
 			j := rtn.Job
 
 			// Send the new kicks if any
@@ -218,15 +223,14 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 					// Add it to r
 					r.Jobs[newJob.Id] = newJob
 
-					nextState, ok := stateMap[newJob.State]
+					nextState, ok := p.stateMap[newJob.State]
 					if !ok {
-						stateNames := make([]string, 0, len(stateMap))
-						log.Fatalf("No state [%s] found in the state map, valid states, %s", newJob.State, strings.Join(stateNames, ", "))
+						log.Fatal(p.invalidStateError(newJob.State))
 					}
 					// If it's terminal, we're done with this job
 					if !nextState.Terminal {
 						// We need to get the chan for the next one
-						nextChan := stateChan[nextState.TriggerState]
+						nextChan := p.stateChan[nextState.TriggerState]
 						// Send the job to the next chan
 						nextChan <- newJob
 						continue
@@ -258,9 +262,9 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			p.statusListener.StatusUpdate(statusCount)
 
 			// Sent the job to the next state channel
-			nextState, ok := stateMap[j.State]
+			nextState, ok := p.stateMap[j.State]
 			if !ok {
-				stateNames := make([]string, 0, len(stateMap))
+				stateNames := make([]string, 0, len(p.stateMap))
 				log.Fatalf("No state [%s] found in the state map, valid states, %s", j.State, strings.Join(stateNames, ", "))
 			}
 			// If it's terminal, we're done with this job
@@ -268,11 +272,11 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 				if rtn.Error != nil {
 					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error)
 					// send it back to the state
-					stateChan[j.State] <- j
+					p.stateChan[j.State] <- j
 					continue
 				}
 				// We need to get the chan for the next one
-				nextChan := stateChan[nextState.TriggerState]
+				nextChan := p.stateChan[nextState.TriggerState]
 				// Send the job to the next chan
 				nextChan <- j
 				continue
@@ -280,7 +284,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			// If the state was terminal, we should see if all of the states are terminated, if so shut down
 			shutdown := true
 			for _, j := range r.Jobs {
-				if !stateMap[j.State].Terminal {
+				if !p.stateMap[j.State].Terminal {
 					shutdown = false
 					break
 				}
@@ -290,11 +294,11 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			}
 			//log.Println("All jobs are terminal state, shutting down")
 			// close all of the channels
-			for _, c := range stateChan {
+			for _, c := range p.stateChan {
 				close(c)
 			}
 			// close ourselves down
-			close(returnChan)
+			close(p.returnChan)
 			break
 		}
 		wg.Done()
@@ -304,4 +308,8 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	wg.Wait()
 
 	return nil
+}
+
+func (p *Processor[AC, OC, JC]) invalidStateError(s string) error {
+	return fmt.Errorf("State [%s] has no executor, valid state names: %s", s, strings.Join(p.stateNames, ", "))
 }
