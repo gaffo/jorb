@@ -16,6 +16,7 @@ type Job[JC any] struct {
 	C           JC                 // C holds the job specific context
 	State       string             // State represents the current processing state of the job
 	StateErrors map[string][]error // StateErrors is a map of errors that occurred in the current state
+	DLQ         bool
 }
 
 // Run is basically the overall state of a given run (batch) in the processing framework
@@ -77,6 +78,8 @@ type State[AC any, OC any, JC any] struct {
 
 	// RateLimit is an optional rate limiter for controlling the execution rate of this state. Useful when calling rate limited apis.
 	RateLimit *rate.Limiter
+	// Retries is the number of errors we can have in this state before kicking to the DLQ
+	Retries int
 }
 
 // KickRequest struct is a job context with a requested state that the
@@ -232,9 +235,12 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			if !nextState.Terminal {
 				if rtn.Error != nil {
 					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error)
-					// send it back to the state
-					p.sendJob(j)
-					continue
+					if len(j.StateErrors[j.State]) < p.stateMap[j.State].Retries {
+						// send it back to the state
+						p.stateChan[j.State] <- j
+						continue
+					}
+					j.DLQ = true
 				}
 				// We need to get the chan for the next one
 				nextChan := p.stateChan[nextState.TriggerState]
@@ -263,7 +269,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
 	allTerminal := true
 	for _, j := range r.Jobs {
-		if !p.stateMap[j.State].Terminal {
+		if !p.stateMap[j.State].Terminal && !j.DLQ {
 			allTerminal = false
 			break
 		}

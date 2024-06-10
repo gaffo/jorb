@@ -1,4 +1,4 @@
-module github.com/gaffo/jorb
+module jorb
 
 go 1.22
 

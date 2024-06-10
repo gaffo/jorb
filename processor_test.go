@@ -331,6 +331,54 @@ func TestProcessor_Retries(t *testing.T) {
 	}
 }
 
+func TestProcessor_DLQ(t *testing.T) {
+	t.Parallel()
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 10; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				jc.Count++
+				if jc.Count <= 4 {
+					return jc, TRIGGER_STATE_NEW, nil, fmt.Errorf("New error")
+				}
+				return jc, STATE_DONE, nil, nil
+			},
+			Terminal:    false,
+			Concurrency: 10,
+			Retries:     3,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE,
+			Exec:         nil,
+			Terminal:     true,
+		},
+	}
+
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+
+	start := time.Now()
+	err := p.Exec(context.Background(), r)
+	delta := time.Since(start)
+	require.NoError(t, err)
+	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, 4, j.C.Count)
+		assert.True(t, j.DLQ)
+		assert.Equal(t, TRIGGER_STATE_NEW, j.State)
+		assert.Equal(t, 1, len(j.StateErrors))
+		assert.Equal(t, 4, len(j.StateErrors[TRIGGER_STATE_NEW]))
+	}
+}
+
 func TestProcessor_StateLog(t *testing.T) {
 	t.Parallel()
 	t.Skip()
@@ -446,11 +494,6 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 	for _, j := range r.Jobs {
 		assert.Equal(t, 10, j.C.Count, "Job Count should be 1")
 	}
-}
-
-func TestProcessor_DLQ(t *testing.T) {
-	t.Parallel()
-	t.Skip()
 }
 
 func TestProcessor_Serialization(t *testing.T) {
