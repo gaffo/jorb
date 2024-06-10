@@ -147,6 +147,14 @@ func (p *Processor[AC, OC, JC]) init() {
 
 	// For each state, we need a channel of jobs
 	p.stateChan = map[string]chan Job[JC]{}
+
+	// Create the state chans
+	for _, s := range p.states {
+		if s.Terminal {
+			continue
+		}
+		p.stateChan[s.TriggerState] = make(chan Job[JC], 10_000)
+	}
 }
 
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
@@ -154,6 +162,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 
 	wg := sync.WaitGroup{}
 
+	// create the workers
 	for _, s := range p.states {
 		// Terminal states don't need to recieve jobs, they're just done
 		if s.Terminal {
@@ -165,14 +174,11 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 
 		concurrency := s.Concurrency
 
-		// Make a channel of that concurrency
-		x := make(chan Job[JC], len(r.Jobs))
-		p.stateChan[s.TriggerState] = x
 		// Make workers for each, they just process and fire back to the central channel
 		for i := 0; i < concurrency; i++ {
 			wg.Add(1) // add a waiter for every go processor, do it before forking
 			go func() {
-				for j := range x {
+				for j := range p.stateChan[s.TriggerState] {
 					if s.RateLimit != nil {
 						s.RateLimit.Wait(ctx)
 					}
