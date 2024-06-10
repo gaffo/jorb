@@ -157,6 +157,7 @@ func (p *Processor[AC, OC, JC]) init() {
 	}
 }
 
+// Exec this big work function, this does all the crunching
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
 	p.init()
 
@@ -175,23 +176,8 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 		concurrency := s.Concurrency
 
 		// Make workers for each, they just process and fire back to the central channel
-		for i := 0; i < concurrency; i++ {
-			wg.Add(1) // add a waiter for every go processor, do it before forking
-			go func() {
-				for j := range p.stateChan[s.TriggerState] {
-					if s.RateLimit != nil {
-						s.RateLimit.Wait(ctx)
-					}
-					// Execute the job
-					rtn := Return[JC]{}
-					j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(p.appContext, r.Overall, j.C)
-
-					rtn.Job = j
-					p.returnChan <- rtn
-				}
-				//log.Printf("Processor [%s] worker done", s.TriggerState)
-				wg.Done()
-			}()
+		for i := 0; i < concurrency; i++ { // add a waiter for every go processor, do it before forking
+			go p.execFunc(ctx, r, s, wg)()
 		}
 	}
 	// wgReturn := sync.WaitGroup{}
@@ -314,6 +300,25 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	wg.Wait()
 
 	return nil
+}
+
+func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], wg sync.WaitGroup) func() {
+	wg.Add(1)
+	return func() {
+		c := p.stateChan[s.TriggerState]
+		for j := range c {
+			if s.RateLimit != nil {
+				s.RateLimit.Wait(ctx)
+			}
+			// Execute the job
+			rtn := Return[JC]{}
+			j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(p.appContext, r.Overall, j.C)
+
+			rtn.Job = j
+			p.returnChan <- rtn
+		}
+		wg.Done()
+	}
 }
 
 func (p *Processor[AC, OC, JC]) invalidStateError(s string) error {
