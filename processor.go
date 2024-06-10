@@ -2,11 +2,8 @@ package jorb
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -82,94 +79,6 @@ type State[AC any, OC any, JC any] struct {
 	RateLimit *rate.Limiter
 }
 
-// Serializer is an interface for job run seralization
-type Serializer[OC any, JC any] interface {
-	Serialize(r Run[OC, JC]) error
-	Deserialize() (Run[OC, JC], error)
-}
-
-// JsonSerializer is a struct that implements Serializer and stores and loads run from a file specified
-// in the File field, there  is a anonymous variable type check
-type JsonSerializer[OC any, JC any] struct {
-	File string
-}
-
-// NewJsonSerializer create a new instance of the JsonSerializer struct.
-// It takes a single argument `file` of type string, which represents the file path where the serialized
-// run data will be stored or loaded from.
-func NewJsonSerializer[OC any, JC any](file string) *JsonSerializer[OC, JC] {
-	return &JsonSerializer[OC, JC]{
-		File: file,
-	}
-}
-
-var _ Serializer[any, any] = (*JsonSerializer[any, any])(nil)
-
-// Serialize takes a Run[OC, JC] instance and serializes it to JSON format,
-// writing the serialized data to the file specified when creating the JsonSerializer instance.
-// It creates the parent directory for the file if it doesn't exist, and creates the file if it doesn't exist.
-//
-// If any error occurs during the process, such as creating the directory, creating the file,
-// or encoding the Run instance, the function returns the error.
-//
-// Parameters:
-//
-//	run Run[OC, JC]: The Run instance to be serialized.
-//
-// Returns:
-//
-//	error: An error value if the serialization or file writing operation fails, otherwise nil.
-func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
-	// Create the parent directory if it doesn't exist
-	dir := filepath.Dir(js.File)
-	err := os.MkdirAll(dir, 0600)
-	if err != nil {
-		return err
-	}
-
-	file, err := os.Create(js.File)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(run)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// Deserialize reads the serialized Run[OC, JC] data from the file specified when creating the JsonSerializer instance,
-// deserializes the JSON data into a Run[OC, JC] instance, and returns the deserialized Run instance.
-//
-// If any error occurs during the process, such as opening the file or decoding the JSON data,
-// the function returns a zero-value Run[OC, JC] instance and the error.
-//
-// Returns:
-//
-//	Run[OC, JC]: The deserialized Run instance.
-//	error: An error value if the deserialization or file reading operation fails, otherwise nil.
-func (js JsonSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
-	file, err := os.Open(js.File)
-	if err != nil {
-		return Run[OC, JC]{}, err
-	}
-	defer file.Close()
-
-	decoder := json.NewDecoder(file)
-	var run Run[OC, JC]
-	err = decoder.Decode(&run)
-	if err != nil {
-		var zero Run[OC, JC]
-		return zero, err
-	}
-
-	return run, nil
-}
-
 // KickRequest struct is a job context with a requested state that the
 // framework will expand into an actual job
 type KickRequest[JC any] struct {
@@ -180,53 +89,6 @@ type KickRequest[JC any] struct {
 type StatusCount struct {
 	State string
 	Count int
-}
-
-// StatusListener is an interface that defines a method for receiving status updates.
-// It is used by the processor to notify interested parties about the current status
-// of job processing.
-type StatusListener interface {
-	// StatusUpdate is called by the processor to provide an update on the current
-	// status of job processing. The `status` parameter is a slice of StatusCount
-	// instances, where each instance represents the count of jobs in a particular state.
-	//
-	// The status counts will be in the same order as the states passed to the processor
-	StatusUpdate(status []StatusCount)
-}
-
-// NilStatusListener is a struct that implements the StatusListener interface with a no-op
-// implementation of the StatusUpdate method. It is useful when you don't need to receive
-// status updates or when you want to use a dummy status listener.
-type NilStatusListener struct {
-}
-
-// StatusUpdate is a no-op implementation that does nothing. It satisfies the StatusListener
-// interface's StatusUpdate method requirement.
-func (n NilStatusListener) StatusUpdate(status []StatusCount) {
-}
-
-// This line ensures that the NilStatusListener struct implements the StatusListener interface.
-// It is a way to verify at compile-time that the NilStatusListener struct correctly implements
-// the required methods of the StatusListener interface.
-var _ StatusListener = &NilStatusListener{}
-
-// NilSerializer implements the Serializer interface with no-op implementations
-// of the Serialize and Deserialize methods. It is useful when you don't need to persist or load
-// Run instances, and is used as the default by NewProcessor if you don't specify one
-type NilSerializer[OC any, JC any] struct {
-}
-
-// Serialize is a no-op implementation that does nothing and always returns nil.
-// It satisfies the Serializer interface's Serialize method requirement.
-func (n *NilSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
-	return nil
-}
-
-// Deserialize is a no-op implementation that panics with a "not implemented" message.
-// It satisfies the Serializer interface's Deserialize method requirement, but it should
-// never be called in practice when using the NilSerializer.
-func (n *NilSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
-	panic("not implemented, shouldn't be called")
 }
 
 // Processor executes a job
