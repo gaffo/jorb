@@ -93,24 +93,19 @@ type StatusCount struct {
 
 // Processor executes a job
 type Processor[AC any, OC any, JC any] struct {
-	AppContext     AC
-	States         []State[AC, OC, JC]
-	Serializer     Serializer[OC, JC]
-	StatusListener StatusListener
+	appContext     AC
+	states         []State[AC, OC, JC]
+	serializer     Serializer[OC, JC]
+	statusListener StatusListener
+	initted        bool
 }
 
 func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) *Processor[AC, OC, JC] {
-	if serializer == nil {
-		serializer = &NilSerializer[OC, JC]{}
-	}
-	if statusListener == nil {
-		statusListener = &NilStatusListener{}
-	}
 	return &Processor[AC, OC, JC]{
-		AppContext:     ac,
-		States:         states,
-		Serializer:     serializer,
-		StatusListener: statusListener,
+		appContext:     ac,
+		states:         states,
+		serializer:     serializer,
+		statusListener: statusListener,
 	}
 }
 
@@ -122,10 +117,23 @@ type Return[JC any] struct {
 	Error        error
 }
 
+func (p *Processor[AC, OC, JC]) init() {
+	if p.initted {
+		return
+	}
+	if p.serializer == nil {
+		p.serializer = &NilSerializer[OC, JC]{}
+	}
+	if p.statusListener == nil {
+		p.statusListener = &NilStatusListener{}
+	}
+}
+
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
+	p.init()
 	// Make a map of triggers to states so we can easily reference it
 	stateMap := map[string]State[AC, OC, JC]{}
-	for _, s := range p.States {
+	for _, s := range p.states {
 		stateMap[s.TriggerState] = s
 	}
 	stateNames := make([]string, 0, len(stateMap))
@@ -141,7 +149,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 
 	wg := sync.WaitGroup{}
 
-	for _, s := range p.States {
+	for _, s := range p.states {
 		// Terminal states don't need to recieve jobs, they're just done
 		if s.Terminal {
 			continue
@@ -165,7 +173,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 					}
 					// Execute the job
 					rtn := Return[JC]{}
-					j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(p.AppContext, r.Overall, j.C)
+					j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(p.appContext, r.Overall, j.C)
 
 					rtn.Job = j
 					returnChan <- rtn
@@ -230,7 +238,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			r.Jobs[j.Id] = j
 
 			// Flush the state
-			err := p.Serializer.Serialize(*r)
+			err := p.serializer.Serialize(*r)
 			if err != nil {
 				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
 			}
@@ -241,13 +249,13 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 				statusCountMap[j.State]++
 			}
 			statusCount := make([]StatusCount, 0, len(statusCountMap))
-			for _, state := range p.States {
+			for _, state := range p.states {
 				statusCount = append(statusCount, StatusCount{
 					State: state.TriggerState,
 					Count: statusCountMap[state.TriggerState],
 				})
 			}
-			p.StatusListener.StatusUpdate(statusCount)
+			p.statusListener.StatusUpdate(statusCount)
 
 			// Sent the job to the next state channel
 			nextState, ok := stateMap[j.State]
