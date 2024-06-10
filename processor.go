@@ -182,12 +182,12 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	}
 
 	// wgReturn := sync.WaitGroup{}
-	wg.Add(1)
 
 	// Now we gotta kick off all of the states to their correct queue
 	p.enqueueAllJobs(r)
 
 	// Make a central processor and start it
+	wg.Add(1)
 	go func() {
 		for rtn := range p.returnChan {
 			j := rtn.Job
