@@ -9,7 +9,7 @@ import (
 // Serializer is an interface for job run seralization
 type Serializer[OC any, JC any] interface {
 	Serialize(r Run[OC, JC]) error
-	Deserialize() (Run[OC, JC], error)
+	Deserialize() (*Run[OC, JC], error)
 }
 
 // JsonSerializer is a struct that implements Serializer and stores and loads run from a file specified
@@ -76,10 +76,10 @@ func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 //
 //	Run[OC, JC]: The deserialized Run instance.
 //	error: An error value if the deserialization or file reading operation fails, otherwise nil.
-func (js JsonSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
+func (js JsonSerializer[OC, JC]) Deserialize() (*Run[OC, JC], error) {
 	file, err := os.Open(js.File)
 	if err != nil {
-		return Run[OC, JC]{}, err
+		return nil, err
 	}
 	defer file.Close()
 
@@ -87,11 +87,10 @@ func (js JsonSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
 	var run Run[OC, JC]
 	err = decoder.Decode(&run)
 	if err != nil {
-		var zero Run[OC, JC]
-		return zero, err
+		return nil, err
 	}
 
-	return run, nil
+	return &run, nil
 }
 
 // NilSerializer implements the Serializer interface with no-op implementations
@@ -109,6 +108,6 @@ func (n *NilSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 // Deserialize is a no-op implementation that panics with a "not implemented" message.
 // It satisfies the Serializer interface's Deserialize method requirement, but it should
 // never be called in practice when using the NilSerializer.
-func (n *NilSerializer[OC, JC]) Deserialize() (Run[OC, JC], error) {
+func (n *NilSerializer[OC, JC]) Deserialize() (*Run[OC, JC], error) {
 	panic("not implemented, shouldn't be called")
 }

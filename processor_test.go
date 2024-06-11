@@ -51,7 +51,7 @@ func TestProcessorOneJob(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
@@ -93,7 +93,7 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				return jc, STATE_MIDDLE, nil, nil
 			},
@@ -102,7 +102,7 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				return jc, STATE_DONE, nil, nil
 			},
@@ -142,7 +142,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				time.Sleep(time.Millisecond * time.Duration(rand.Intn(1000)))
 				jc.Count += 1
 				c := rand.Intn(2) == 0
@@ -233,7 +233,7 @@ func TestProcessor_StateCallback(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
@@ -275,7 +275,7 @@ func TestProcessor_Retries(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count++
 				if jc.Count <= 3 {
 					return jc, TRIGGER_STATE_NEW, nil, fmt.Errorf("New error")
@@ -330,7 +330,7 @@ func TestProcessor_RateLimiter(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				time.Sleep(time.Second)
 				return jc, STATE_MIDDLE, nil, nil
@@ -341,7 +341,7 @@ func TestProcessor_RateLimiter(t *testing.T) {
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				time.Sleep(time.Second)
 				return jc, STATE_DONE, nil, nil
@@ -383,7 +383,7 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				return jc, STATE_MIDDLE, nil, nil
 			},
@@ -392,7 +392,7 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
 				if jc.Count > 9 {
 					return jc, STATE_DONE, nil, nil
@@ -447,7 +447,7 @@ func TestProcessor_Serialization(t *testing.T) {
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
@@ -478,7 +478,8 @@ func TestProcessor_Serialization(t *testing.T) {
 	// Now reload the job
 	actual, err := serialzer.Deserialize()
 	require.NoError(t, err)
-	assert.Equal(t, *r, actual)
+	assert.NotNil(t, r)
+	assert.Equal(t, r, actual)
 }
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -511,7 +512,7 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 		// This state generates a list of job requests
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				newJobs := []KickRequest[MyJobContext]{}
 				for _, state := range jc.StringList {
 					newJobs = append(newJobs, KickRequest[MyJobContext]{
@@ -528,7 +529,7 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_MIDDLE,
-			Exec: func(ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count = len(jc.String)
 				return jc, STATE_DONE_TWO, nil, nil
 			},

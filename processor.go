@@ -66,7 +66,7 @@ type State[AC any, OC any, JC any] struct {
 	// and returns the updated job context (JC), the next state string,
 	// a slice of kick requests ([]KickRequest[JC]) for triggering other jobs,
 	// and an error (if any).
-	Exec func(ac AC, oc OC, jc JC) (JC, string, []KickRequest[JC], error)
+	Exec func(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []KickRequest[JC], error)
 
 	// Terminal indicates whether this state is a terminal state,
 	// meaning that no further state transitions should occur after reaching this state.
@@ -325,7 +325,7 @@ func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s 
 			}
 			// Execute the job
 			rtn := Return[JC]{}
-			j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(p.appContext, r.Overall, j.C)
+			j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(ctx, p.appContext, r.Overall, j.C)
 
 			rtn.Job = j
 			p.returnChan <- rtn
