@@ -40,5 +40,5 @@ func TestJsonSerializer_SaveLoad(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check that the run is the same
-	assert.EqualValues(t, *run, actualRun)
+	assert.EqualValues(t, run, actualRun)
 }
