@@ -232,20 +232,17 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 				log.Fatalf("No state [%s] found in the state map, valid states, %s", j.State, strings.Join(stateNames, ", "))
 			}
 			// If it's terminal, we're done with this job
-			if !nextState.Terminal {
-				if rtn.Error != nil {
-					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error)
-					if len(j.StateErrors[j.State]) < p.stateMap[j.State].Retries {
-						// send it back to the state
-						p.stateChan[j.State] <- j
-						continue
-					}
-					j.DLQ = true
+			if !nextState.Terminal && rtn.Error != nil {
+				j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error)
+				if len(j.StateErrors[j.State]) < p.stateMap[j.State].Retries {
+					// send it back to the state
+					p.sendJob(j)
+					continue
 				}
-				// We need to get the chan for the next one
-				nextChan := p.stateChan[nextState.TriggerState]
-				// Send the job to the next chan
-				nextChan <- j
+				j.DLQ = true
+				r.Jobs[j.Id] = j
+			} else {
+				p.sendJob(j)
 				continue
 			}
 			// If the state was terminal, we should see if all of the states are terminated, if so shut down

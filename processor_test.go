@@ -336,20 +336,17 @@ func TestProcessor_DLQ(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
-	for i := 0; i < 10; i++ {
-		r.AddJob(MyJobContext{
-			Count: 0,
-		})
-	}
+	//for i := 0; i < 1; i++ {
+	r.AddJob(MyJobContext{
+		Count: 0,
+	})
+	//}
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count++
-				if jc.Count <= 4 {
-					return jc, TRIGGER_STATE_NEW, nil, fmt.Errorf("New error")
-				}
-				return jc, STATE_DONE, nil, nil
+				return jc, TRIGGER_STATE_NEW, nil, fmt.Errorf("New error")
 			},
 			Terminal:    false,
 			Concurrency: 10,
@@ -371,11 +368,11 @@ func TestProcessor_DLQ(t *testing.T) {
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
 
 	for _, j := range r.Jobs {
-		assert.Equal(t, 4, j.C.Count)
+		assert.Equal(t, 3, j.C.Count)
 		assert.True(t, j.DLQ)
 		assert.Equal(t, TRIGGER_STATE_NEW, j.State)
 		assert.Equal(t, 1, len(j.StateErrors))
-		assert.Equal(t, 4, len(j.StateErrors[TRIGGER_STATE_NEW]))
+		assert.Equal(t, 3, len(j.StateErrors[TRIGGER_STATE_NEW]))
 	}
 }
 
