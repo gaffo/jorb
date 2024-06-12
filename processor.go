@@ -288,9 +288,10 @@ func (p *Processor[AC, OC, JC]) kickJobs(rtn Return[JC], j Job[JC], r *Run[OC, J
 		for _, k := range rtn.KickRequests {
 			// Add the new job to the state
 			newJob := Job[JC]{
-				Id:    fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
-				C:     k.C,
-				State: k.State,
+				Id:          fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
+				C:           k.C,
+				State:       k.State,
+				StateErrors: map[string][]error{},
 			}
 			// Add it to r
 			r.Jobs[newJob.Id] = newJob
