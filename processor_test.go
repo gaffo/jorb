@@ -80,6 +80,32 @@ func TestProcessorOneJob(t *testing.T) {
 	}
 }
 
+func TestProcessorAllTerminal(t *testing.T) {
+	t.Parallel()
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 10; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Terminal:     true,
+		},
+	}
+
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+
+	start := time.Now()
+	err := p.Exec(context.Background(), r)
+	delta := time.Since(start)
+	require.NoError(t, err)
+	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+}
+
 func TestProcessorTwoSequentialJobs(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}

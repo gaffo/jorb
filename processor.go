@@ -161,6 +161,10 @@ func (p *Processor[AC, OC, JC]) init() {
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
 	p.init()
 
+	if p.allJobsAreTerminal(r) {
+		return nil
+	}
+
 	wg := sync.WaitGroup{}
 
 	// create the workers
@@ -239,14 +243,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 				continue
 			}
 			// If the state was terminal, we should see if all of the states are terminated, if so shut down
-			shutdown := true
-			for _, j := range r.Jobs {
-				if !p.stateMap[j.State].Terminal {
-					shutdown = false
-					break
-				}
-			}
-			if !shutdown {
+			if !p.allJobsAreTerminal(r) {
 				continue
 			}
 
@@ -261,6 +258,17 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	wg.Wait()
 
 	return nil
+}
+
+func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
+	allTerminal := true
+	for _, j := range r.Jobs {
+		if !p.stateMap[j.State].Terminal {
+			allTerminal = false
+			break
+		}
+	}
+	return allTerminal
 }
 
 func (p *Processor[AC, OC, JC]) enqueueAllJobs(r *Run[OC, JC]) {
