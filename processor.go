@@ -12,10 +12,10 @@ import (
 
 // Job represents the current processing state of any job
 type Job[JC any] struct {
-	Id          string             // Id is a unique identifier for the job
-	C           JC                 // C holds the job specific context
-	State       string             // State represents the current processing state of the job
-	StateErrors map[string][]error // StateErrors is a map of errors that occurred in the current state
+	Id          string              // Id is a unique identifier for the job
+	C           JC                  // C holds the job specific context
+	State       string              // State represents the current processing state of the job
+	StateErrors map[string][]string // StateErrors is a map of errors that occurred in the current state
 }
 
 // Run is basically the overall state of a given run (batch) in the processing framework
@@ -47,7 +47,7 @@ func (r *Run[OC, JC]) AddJob(jc JC) {
 		Id:          id,
 		C:           jc,
 		State:       TRIGGER_STATE_NEW,
-		StateErrors: map[string][]error{},
+		StateErrors: map[string][]string{},
 	}
 }
 
@@ -231,7 +231,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 			// If it's terminal, we're done with this job
 			if !nextState.Terminal {
 				if rtn.Error != nil {
-					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error)
+					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error.Error())
 					// send it back to the state
 					p.sendJob(j)
 					continue
@@ -299,7 +299,7 @@ func (p *Processor[AC, OC, JC]) kickJobs(rtn Return[JC], j Job[JC], r *Run[OC, J
 				Id:          fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
 				C:           k.C,
 				State:       k.State,
-				StateErrors: map[string][]error{},
+				StateErrors: map[string][]string{},
 			}
 			// Add it to r
 			r.Jobs[newJob.Id] = newJob

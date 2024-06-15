@@ -42,3 +42,32 @@ func TestJsonSerializer_SaveLoad(t *testing.T) {
 	// Check that the run is the same
 	assert.EqualValues(t, run, actualRun)
 }
+
+func Test_SerializeWithError(t *testing.T) {
+	t.Parallel()
+	// Create a temporary directory for testing
+	tempDir, err := os.MkdirTemp("", "test")
+	if err != nil {
+		t.Fatalf("Failed to create temporary directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	r := NewRun[MyOverallContext, MyJobContext]("test", MyOverallContext{Name: "overall"})
+	r.Jobs["key"] = Job[MyJobContext]{C: MyJobContext{Count: 0, Name: "job-0"}, StateErrors: map[string][]string{
+		"key": []string{
+			"e1", "e2",
+		},
+	}}
+
+	tempFile := filepath.Join(tempDir, "test.json")
+	serializer := &JsonSerializer[MyOverallContext, MyJobContext]{File: tempFile}
+
+	err = serializer.Serialize(*r)
+	require.NoError(t, err)
+
+	actualRun, err := serializer.Deserialize()
+	require.NoError(t, err)
+
+	// Check that the run is the same
+	assert.EqualValues(t, r, actualRun)
+}
