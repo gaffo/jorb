@@ -52,7 +52,6 @@ func TestProcessorOneJob(t *testing.T) {
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
-				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
 				return jc, STATE_DONE, nil, nil
@@ -393,6 +392,51 @@ func TestProcessor_RateLimiter(t *testing.T) {
 
 	for _, j := range r.Jobs {
 		assert.Equal(t, 2, j.C.Count, "Job Count should be 1")
+	}
+}
+
+func TestProcessor_RateLimiterSlows(t *testing.T) {
+	t.Parallel()
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 3; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+	concurrency := 2
+	seconds := 1.0
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				jc.Count += 1
+				return jc, STATE_DONE, nil, nil
+			},
+			Terminal:    false,
+			Concurrency: concurrency,                                                        // When we have multiple workers we might have multiple limiters
+			RateLimit:   rate.NewLimiter(rate.Every(time.Second*time.Duration(seconds)), 1), // Every 5 seconds
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE,
+			Exec:         nil,
+			Terminal:     true,
+		},
+	}
+
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+
+	start := time.Now()
+	err := p.Exec(context.Background(), r)
+	delta := time.Since(start)
+	require.NoError(t, err)
+	jobCount := len(r.Jobs)
+	expected := time.Second * time.Duration(float64(jobCount)/seconds-1)
+	assert.Less(t, expected, delta)
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, 1, j.C.Count, j.Id)
 	}
 }
 
