@@ -1,7 +1,9 @@
 package jorb
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -51,14 +53,22 @@ func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 		return err
 	}
 
+	buf := &bytes.Buffer{}
+
+	encoder := json.NewEncoder(buf)
+	encoder.SetIndent("", "  ")
+	err = encoder.Encode(run)
+	if err != nil {
+		return err
+	}
+
 	file, err := os.Create(js.File)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(run)
+	_, err = io.Copy(file, buf)
 	if err != nil {
 		return err
 	}
