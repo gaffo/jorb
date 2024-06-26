@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
+	"runtime/pprof"
 	"strings"
 	"sync"
 
@@ -43,12 +45,14 @@ func NewRun[OC any, JC any](name string, oc OC) *Run[OC, JC] {
 func (r *Run[OC, JC]) AddJob(jc JC) {
 	// TODO: Use a uuid for the jobs
 	id := fmt.Sprintf("%d", len(r.Jobs))
-	r.Jobs[id] = Job[JC]{
+	j := Job[JC]{
 		Id:          id,
 		C:           jc,
 		State:       TRIGGER_STATE_NEW,
 		StateErrors: map[string][]string{},
 	}
+	slog.Info("AddJob", "run", r.Name, "job", j, "totalJobs", len(r.Jobs))
+	r.Jobs[id] = j
 }
 
 const (
@@ -162,6 +166,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	p.init()
 
 	if p.allJobsAreTerminal(r) {
+		slog.Info("AllJobsTerminal")
 		return nil
 	}
 
@@ -181,14 +186,17 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 
 		// Make workers for each, they just process and fire back to the central channel
 		for i := 0; i < concurrency; i++ { // add a waiter for every go processor, do it before forking
-			go p.execFunc(ctx, r, s, wg)()
+			labels := pprof.Labels("type", "jorbWorker", "state", s.TriggerState, "id", fmt.Sprintf("%d", i))
+			pprof.Do(ctx, labels, func(_ context.Context) {
+				go p.execFunc(ctx, r, s, i, wg)()
+			})
 		}
 	}
 
 	// wgReturn := sync.WaitGroup{}
 
 	// Now we gotta kick off all of the states to their correct queue
-	p.enqueueAllJobs(r)
+	go func() { p.enqueueAllJobs(r) }()
 
 	// Make a central processor and start it
 	wg.Add(1)
@@ -263,7 +271,12 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
 	allTerminal := true
 	for _, j := range r.Jobs {
+		// TODO: Refactor this to be a method on Job that takes the state map
 		if !p.stateMap[j.State].Terminal {
+			slog.Info("Job not terminal",
+				"job", j.Id,
+				"state", j.State,
+			)
 			allTerminal = false
 			break
 		}
@@ -272,14 +285,16 @@ func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
 }
 
 func (p *Processor[AC, OC, JC]) enqueueAllJobs(r *Run[OC, JC]) {
+	slog.Info("Enqueing Jobs", "jobCount", len(r.Jobs))
 	for _, job := range r.Jobs {
 		// If it's in a terminal state, skip
 		if p.stateMap[job.State].Terminal {
 			continue
 		}
-
+		slog.Info("Enqueing Job", "state", job.State, "job", job.Id)
 		p.sendJob(job)
 	}
+	slog.Info("All Jobs Enqueue", "jobCount", len(r.Jobs))
 }
 
 func (p *Processor[AC, OC, JC]) shutdown() {
@@ -321,12 +336,13 @@ func (p *Processor[AC, OC, JC]) kickJobs(rtn Return[JC], j Job[JC], r *Run[OC, J
 }
 
 func (p *Processor[AC, OC, JC]) sendJob(job Job[JC]) {
-	p.stateChan[job.State] <- job
+	go func() { p.stateChan[job.State] <- job }()
 }
 
-func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], wg sync.WaitGroup) func() {
+func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], i int, wg sync.WaitGroup) func() {
 	wg.Add(1)
 	return func() {
+		slog.Info("Starting worker", "worker", i, "state", s.TriggerState)
 		c := p.stateChan[s.TriggerState]
 		for j := range c {
 			if s.RateLimit != nil {
@@ -334,12 +350,15 @@ func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s 
 			}
 			// Execute the job
 			rtn := Return[JC]{}
+			slog.Info("Executing job", "job", j.Id, "state", s.TriggerState)
 			j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(ctx, p.appContext, r.Overall, j.C)
+			slog.Info("Execution complete", "job", j.Id, "state", s.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
 
 			rtn.Job = j
 			p.returnChan <- rtn
 		}
 		wg.Done()
+		slog.Info("Stopped worker", "worker", i, "state", s.TriggerState)
 	}
 }
 
