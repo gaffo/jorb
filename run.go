@@ -42,6 +42,7 @@ func (r *Run[OC, JC]) Init() {
 	r.lockedJobsById = map[string]bool{}
 	r.lockedJobsStateCount = map[string]int{}
 	r.stateCount = map[string]int{}
+	r.updateStateCounts()
 }
 
 // Add a job to the pool, this shouldn't be called once it's running
@@ -59,6 +60,7 @@ func (r *Run[OC, JC]) AddJob(jc JC) {
 	}
 	slog.Info("AddJob", "run", r.Name, "job", j, "totalJobs", len(r.Jobs))
 	r.Jobs[id] = j
+	r.updateStateCounts()
 }
 
 func (r *Run[OC, JC]) NextJobForState(state string) (Job[JC], bool) {
@@ -138,4 +140,18 @@ func (r *Run[OC, JC]) JobsInFlight() bool {
 		}
 	}
 	return false
+}
+
+func (r *Run[OC, JC]) StatusCounts() map[string]StatusCount {
+	ret := map[string]StatusCount{}
+
+	for k, v := range r.stateCount {
+		ret[k] = StatusCount{
+			State:     k,
+			Count:     v,
+			Executing: r.lockedJobsStateCount[k],
+		}
+	}
+
+	return ret
 }

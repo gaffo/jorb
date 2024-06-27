@@ -53,11 +53,14 @@ func Test_SerializeWithError(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	r := NewRun[MyOverallContext, MyJobContext]("test", MyOverallContext{Name: "overall"})
-	r.Jobs["key"] = Job[MyJobContext]{C: MyJobContext{Count: 0, Name: "job-0"}, StateErrors: map[string][]string{
-		"key": []string{
-			"e1", "e2",
+	r.Return(Job[MyJobContext]{
+		C: MyJobContext{Count: 0, Name: "job-0"},
+		StateErrors: map[string][]string{
+			"key": []string{
+				"e1", "e2",
+			},
 		},
-	}}
+	})
 
 	tempFile := filepath.Join(tempDir, "test.json")
 	serializer := &JsonSerializer[MyOverallContext, MyJobContext]{File: tempFile}
@@ -68,6 +71,15 @@ func Test_SerializeWithError(t *testing.T) {
 	actualRun, err := serializer.Deserialize()
 	require.NoError(t, err)
 
-	// Check that the run is the same
+	// Nill out the last updates so we don't have to do assert near
+	for k, _ := range r.Jobs {
+		j := r.Jobs[k]
+		j.LastUpdate = nil
+		r.Jobs[k] = j
+
+		j = actualRun.Jobs[k]
+		j.LastUpdate = nil
+		actualRun.Jobs[k] = j
+	}
 	assert.EqualValues(t, r, actualRun)
 }

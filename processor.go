@@ -48,8 +48,10 @@ type KickRequest[JC any] struct {
 }
 
 type StatusCount struct {
-	State string
-	Count int
+	State     string
+	Count     int
+	Executing int
+	Terminal  bool
 }
 
 // Processor executes a job
@@ -211,18 +213,25 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 }
 
 func (p *Processor[AC, OC, JC]) updateStatusCounts(r *Run[OC, JC]) {
-	statusCountMap := map[string]int{}
-	for _, j := range r.Jobs {
-		statusCountMap[j.State]++
-	}
-	statusCount := make([]StatusCount, 0, len(statusCountMap))
+	counts := r.StatusCounts()
+
+	ret := []StatusCount{}
+
 	for _, state := range p.states {
-		statusCount = append(statusCount, StatusCount{
-			State: state.TriggerState,
-			Count: statusCountMap[state.TriggerState],
-		})
+		if _, ok := counts[state.TriggerState]; !ok {
+			ret = append(ret, StatusCount{
+				State:     state.TriggerState,
+				Count:     0,
+				Executing: 0,
+				Terminal:  state.Terminal,
+			})
+			continue
+		}
+		c := counts[state.TriggerState]
+		c.Terminal = state.Terminal
+		ret = append(ret, c)
 	}
-	p.statusListener.StatusUpdate(statusCount)
+	p.statusListener.StatusUpdate(ret)
 }
 
 func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {

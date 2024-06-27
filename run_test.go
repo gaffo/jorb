@@ -6,6 +6,50 @@ import (
 	"testing"
 )
 
+func TestStatusCounts(t *testing.T) {
+	t.Parallel()
+	r := NewRun[MyOverallContext, MyJobContext]("job", MyOverallContext{})
+	r.AddJob(MyJobContext{Count: 0})
+	r.AddJob(MyJobContext{Count: 0})
+	r.AddJob(MyJobContext{Count: 0})
+
+	assert.Equal(t, map[string]StatusCount{
+		TRIGGER_STATE_NEW: {
+			State:     TRIGGER_STATE_NEW,
+			Count:     3,
+			Executing: 0,
+		},
+	}, r.StatusCounts())
+
+	j, ok := r.NextJobForState(TRIGGER_STATE_NEW)
+	require.True(t, ok)
+
+	assert.Equal(t, map[string]StatusCount{
+		TRIGGER_STATE_NEW: {
+			State:     TRIGGER_STATE_NEW,
+			Count:     3,
+			Executing: 1,
+		},
+	}, r.StatusCounts())
+
+	j.State = STATE_MIDDLE
+	r.Return(j)
+
+	assert.Equal(t, map[string]StatusCount{
+		TRIGGER_STATE_NEW: {
+			State:     TRIGGER_STATE_NEW,
+			Count:     2,
+			Executing: 0,
+		},
+		STATE_MIDDLE: {
+			State:     STATE_MIDDLE,
+			Count:     1,
+			Executing: 0,
+			Terminal:  false,
+		},
+	}, r.StatusCounts())
+}
+
 func TestRun_NextForStatus_NoJobs(t *testing.T) {
 	t.Parallel()
 	r := NewRun[MyOverallContext, MyJobContext]("job", MyOverallContext{})

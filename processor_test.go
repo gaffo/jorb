@@ -270,8 +270,9 @@ func TestProcessor_StateCallback(t *testing.T) {
 			Count: 0,
 		},
 		{
-			State: STATE_DONE,
-			Count: 1,
+			State:    STATE_DONE,
+			Count:    1,
+			Terminal: true,
 		},
 	})
 
