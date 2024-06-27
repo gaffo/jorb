@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Serializer is an interface for job run seralization
@@ -46,6 +48,7 @@ var _ Serializer[any, any] = (*JsonSerializer[any, any])(nil)
 //
 //	error: An error value if the serialization or file writing operation fails, otherwise nil.
 func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
+	start := time.Now()
 	// Create the parent directory if it doesn't exist
 	dir := filepath.Dir(js.File)
 	err := os.MkdirAll(dir, 0600)
@@ -73,6 +76,8 @@ func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 		return err
 	}
 
+	slog.Info("Serialized", "file", js.File, "delta", time.Since(start))
+
 	return nil
 }
 
@@ -87,6 +92,7 @@ func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 //	Run[OC, JC]: The deserialized Run instance.
 //	error: An error value if the deserialization or file reading operation fails, otherwise nil.
 func (js JsonSerializer[OC, JC]) Deserialize() (*Run[OC, JC], error) {
+	start := time.Now()
 	file, err := os.Open(js.File)
 	if err != nil {
 		return nil, err
@@ -100,6 +106,9 @@ func (js JsonSerializer[OC, JC]) Deserialize() (*Run[OC, JC], error) {
 		return nil, err
 	}
 
+	slog.Info("Deserialized", "file", js.File, "delta", time.Since(start))
+
+	run.Init()
 	return &run, nil
 }
 

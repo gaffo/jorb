@@ -12,49 +12,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Job represents the current processing state of any job
-type Job[JC any] struct {
-	Id          string              // Id is a unique identifier for the job
-	C           JC                  // C holds the job specific context
-	State       string              // State represents the current processing state of the job
-	StateErrors map[string][]string // StateErrors is a map of errors that occurred in the current state
-}
-
-// Run is basically the overall state of a given run (batch) in the processing framework
-// it's meant to be re-entrant, eg if you kill the processor and you have a serializaer, you can
-// restart using it at any time
-type Run[OC any, JC any] struct {
-	Name    string             // Name of the run
-	Jobs    map[string]Job[JC] // Map of jobs, where keys are job ids and values are Job states
-	Overall OC                 // Overall overall state that is usful to all jobs, basically context for the overall batch
-}
-
-// NewRun creates a new Run instance with the given name and overall context
-//
-// Use the overall context to store any state that all of the jobs will want access to instead of
-// storing it in the specific JobContexts
-func NewRun[OC any, JC any](name string, oc OC) *Run[OC, JC] {
-	return &Run[OC, JC]{
-		Name:    name,
-		Jobs:    map[string]Job[JC]{},
-		Overall: oc,
-	}
-}
-
-// Add a job to the pool, this shouldn't be called once it's running
-func (r *Run[OC, JC]) AddJob(jc JC) {
-	// TODO: Use a uuid for the jobs
-	id := fmt.Sprintf("%d", len(r.Jobs))
-	j := Job[JC]{
-		Id:          id,
-		C:           jc,
-		State:       TRIGGER_STATE_NEW,
-		StateErrors: map[string][]string{},
-	}
-	slog.Info("AddJob", "run", r.Name, "job", j, "totalJobs", len(r.Jobs))
-	r.Jobs[id] = j
-}
-
 const (
 	TRIGGER_STATE_NEW = "new"
 )
@@ -146,19 +103,21 @@ func (p *Processor[AC, OC, JC]) init() {
 		p.stateNames = append(p.stateNames, k)
 	}
 
-	// When a job changes state, we send it to this channel to centrally manage and re-queue
-	p.returnChan = make(chan Return[JC], 10_000)
-
 	// For each state, we need a channel of jobs
 	p.stateChan = map[string]chan Job[JC]{}
 
 	// Create the state chans
+	totalConcurrency := 0
 	for _, s := range p.states {
 		if s.Terminal {
 			continue
 		}
-		p.stateChan[s.TriggerState] = make(chan Job[JC], 10_000)
+		p.stateChan[s.TriggerState] = make(chan Job[JC], s.Concurrency) // make a chan
+		totalConcurrency += s.Concurrency
 	}
+
+	// When a job changes state, we send it to this channel to centrally manage and re-queue
+	p.returnChan = make(chan Return[JC], totalConcurrency*2) // make it the size of the total amount of in flight jobs we could have so that each worker can return a task
 }
 
 // Exec this big work function, this does all the crunching
@@ -193,79 +152,77 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 		}
 	}
 
-	// wgReturn := sync.WaitGroup{}
-
-	// Now we gotta kick off all of the states to their correct queue
-	go func() { p.enqueueAllJobs(r) }()
+	go func() { p.enqueueAllJobs(r) }() // fill all the outbound queues once in a seperate goroutine to prime the pump faster
 
 	// Make a central processor and start it
 	wg.Add(1)
-	go func() {
-		for rtn := range p.returnChan {
-			j := rtn.Job
+	pprof.Do(ctx, pprof.Labels("type", "ReturnChanWorker"), func(_ context.Context) {
+		go func() {
+			for rtn := range p.returnChan {
+				slog.Info("ReturnChan GotJobBack", "jobId", rtn.Job.Id, "state", rtn.Job.State, "kickRequests", len(rtn.KickRequests), "error", rtn.Error)
+				j := rtn.Job
 
-			// Send the new kicks if any
-			p.kickJobs(rtn, j, r)
+				// Send the new kicks if any
+				p.kickJobs(rtn, j, r)
 
-			// Update the job
-			r.Jobs[j.Id] = j
-
-			// Flush the state
-			err := p.serializer.Serialize(*r)
-			if err != nil {
-				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
-			}
-
-			// Calculate state counts
-			statusCountMap := map[string]int{}
-			for _, j := range r.Jobs {
-				statusCountMap[j.State]++
-			}
-			statusCount := make([]StatusCount, 0, len(statusCountMap))
-			for _, state := range p.states {
-				statusCount = append(statusCount, StatusCount{
-					State: state.TriggerState,
-					Count: statusCountMap[state.TriggerState],
-				})
-			}
-			p.statusListener.StatusUpdate(statusCount)
-
-			// Sent the job to the next state channel
-			nextState, ok := p.stateMap[j.State]
-			if !ok {
-				stateNames := make([]string, 0, len(p.stateMap))
-				log.Fatalf("No state [%s] found in the state map, valid states, %s", j.State, strings.Join(stateNames, ", "))
-			}
-			// If it's terminal, we're done with this job
-			if !nextState.Terminal {
+				// Append the error if needed
 				if rtn.Error != nil {
 					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error.Error())
-					// send it back to the state
-					p.sendJob(j)
+				}
+
+				// return the job
+				r.Return(j)
+
+				// Flush the state
+				err := p.serializer.Serialize(*r)
+				if err != nil {
+					log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
+				}
+
+				// update the status counts
+				p.updateStatusCounts(r)
+
+				// flush out any new jobs we can
+				p.enqueueAllJobs(r)
+
+				// If the state was terminal, we should see if all of the states are terminated, if so shut down
+				if !p.allJobsAreTerminal(r) {
 					continue
 				}
-				// We need to get the chan for the next one
-				nextChan := p.stateChan[nextState.TriggerState]
-				// Send the job to the next chan
-				nextChan <- j
-				continue
-			}
-			// If the state was terminal, we should see if all of the states are terminated, if so shut down
-			if !p.allJobsAreTerminal(r) {
-				continue
-			}
 
-			p.shutdown()
+				// if there are any jobs in flight in the run, keep going
+				if r.JobsInFlight() {
+					continue
+				}
 
-			break
-		}
-		wg.Done()
-	}()
+				p.shutdown()
+
+				break
+			}
+			slog.Info("ReturnChanWorker Quit")
+			wg.Done()
+		}()
+	})
 
 	// Wait for all of the processors to quit
 	wg.Wait()
 
 	return nil
+}
+
+func (p *Processor[AC, OC, JC]) updateStatusCounts(r *Run[OC, JC]) {
+	statusCountMap := map[string]int{}
+	for _, j := range r.Jobs {
+		statusCountMap[j.State]++
+	}
+	statusCount := make([]StatusCount, 0, len(statusCountMap))
+	for _, state := range p.states {
+		statusCount = append(statusCount, StatusCount{
+			State: state.TriggerState,
+			Count: statusCountMap[state.TriggerState],
+		})
+	}
+	p.statusListener.StatusUpdate(statusCount)
 }
 
 func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
@@ -286,15 +243,35 @@ func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
 
 func (p *Processor[AC, OC, JC]) enqueueAllJobs(r *Run[OC, JC]) {
 	slog.Info("Enqueing Jobs", "jobCount", len(r.Jobs))
-	for _, job := range r.Jobs {
-		// If it's in a terminal state, skip
-		if p.stateMap[job.State].Terminal {
-			continue
-		}
-		slog.Info("Enqueing Job", "state", job.State, "job", job.Id)
-		p.sendJob(job)
+	enqueued := 0
+	for _, state := range p.states {
+		enqueued += p.enqueueJobsForState(r, state) // mutates r.Jobs
 	}
-	slog.Info("All Jobs Enqueue", "jobCount", len(r.Jobs))
+	slog.Info("All Queues Primed", "jobCount", len(r.Jobs), "enqueuedCount", enqueued)
+}
+
+func (p *Processor[AC, OC, JC]) enqueueJobsForState(r *Run[OC, JC], state State[AC, OC, JC]) int {
+	slog.Info("Enqueueing jobs for state", "state", state.TriggerState)
+	enqueued := 0
+	for {
+		j, ok := r.NextJobForState(state.TriggerState)
+		if !ok {
+			slog.Info("No more jobs for state", "state", state.TriggerState)
+			return enqueued
+		}
+		c := p.stateChan[state.TriggerState]
+		select {
+		case c <- j:
+			enqueued++
+			slog.Info("Enqueing Job", "state", j.State, "job", j.Id)
+			continue
+		default:
+			r.Return(j)
+			return enqueued
+		}
+	}
+	slog.Info("Enqueued jobs for state", "state", state.TriggerState, "enqueuedCount", enqueued)
+	return enqueued
 }
 
 func (p *Processor[AC, OC, JC]) shutdown() {
@@ -309,34 +286,24 @@ func (p *Processor[AC, OC, JC]) shutdown() {
 func (p *Processor[AC, OC, JC]) kickJobs(rtn Return[JC], j Job[JC], r *Run[OC, JC]) {
 	if rtn.KickRequests != nil {
 		for _, k := range rtn.KickRequests {
-			// Add the new job to the state
+			// create a new job with the right state
 			newJob := Job[JC]{
 				Id:          fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
 				C:           k.C,
 				State:       k.State,
 				StateErrors: map[string][]string{},
 			}
-			// Add it to r
-			r.Jobs[newJob.Id] = newJob
 
-			nextState, ok := p.stateMap[newJob.State]
+			// validate it
+			_, ok := p.stateMap[newJob.State]
 			if !ok {
 				log.Fatal(p.invalidStateError(newJob.State))
 			}
-			// If it's terminal, we're done with this job
-			if !nextState.Terminal {
-				// We need to get the chan for the next one
-				nextChan := p.stateChan[nextState.TriggerState]
-				// Send the job to the next chan
-				nextChan <- newJob
-				continue
-			}
+
+			// return it to the run, it'll get re-enqueued by the main return loop
+			r.Return(newJob)
 		}
 	}
-}
-
-func (p *Processor[AC, OC, JC]) sendJob(job Job[JC]) {
-	go func() { p.stateChan[job.State] <- job }()
 }
 
 func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], i int, wg sync.WaitGroup) func() {
@@ -347,6 +314,7 @@ func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s 
 		for j := range c {
 			if s.RateLimit != nil {
 				s.RateLimit.Wait(ctx)
+				slog.Info("LimiterAllowed", "worker", i, "state", s.TriggerState, "job", j.Id)
 			}
 			// Execute the job
 			rtn := Return[JC]{}
@@ -355,7 +323,11 @@ func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s 
 			slog.Info("Execution complete", "job", j.Id, "state", s.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
 
 			rtn.Job = j
+			//go func() {
+			slog.Info("Returning job", "job", j.Id, "newState", j.State)
 			p.returnChan <- rtn
+			slog.Info("Returned job", "job", j.Id, "newState", j.State)
+			//}()
 		}
 		wg.Done()
 		slog.Info("Stopped worker", "worker", i, "state", s.TriggerState)
