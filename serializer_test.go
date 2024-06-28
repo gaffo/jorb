@@ -2,11 +2,12 @@ package jorb
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestJsonSerializer_SaveLoad(t *testing.T) {
@@ -40,7 +41,9 @@ func TestJsonSerializer_SaveLoad(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check that the run is the same
-	assert.EqualValues(t, run, actualRun)
+	assert.Equal(t, run.Overall, actualRun.Overall)
+	assert.Equal(t, run.Name, actualRun.Name)
+	assert.Equal(t, run.Jobs, actualRun.Jobs)
 }
 
 func Test_SerializeWithError(t *testing.T) {
@@ -81,5 +84,7 @@ func Test_SerializeWithError(t *testing.T) {
 		j.LastUpdate = nil
 		actualRun.Jobs[k] = j
 	}
-	assert.EqualValues(t, r, actualRun)
+	assert.Equal(t, r.Overall, actualRun.Overall)
+	assert.Equal(t, r.Name, actualRun.Name)
+	assert.Equal(t, r.Jobs, actualRun.Jobs)
 }
