@@ -24,6 +24,13 @@ OS.
 
 The unit tests in processor_test.go provide a pretty good example to get started, for instance https://github.com/gaffo/jorb/blob/main/processor_test.go#L111
 
+# Installation
+To install Jorb, use:
+
+```sh
+go get github.com/gaffo/jorb
+```
+
 # Concepts
 
 When making a program you basically need the following: AC, OC, JC, Job, Run, States, StatusListener, Serializer, and a Processor
