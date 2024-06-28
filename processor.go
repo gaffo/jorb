@@ -160,49 +160,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	wg.Add(1)
 	pprof.Do(ctx, pprof.Labels("type", "ReturnChanWorker"), func(_ context.Context) {
 		go func() {
-			for rtn := range p.returnChan {
-				slog.Info("ReturnChan GotJobBack", "jobId", rtn.Job.Id, "state", rtn.Job.State, "kickRequests", len(rtn.KickRequests), "error", rtn.Error)
-				j := rtn.Job
-
-				// Send the new kicks if any
-				p.kickJobs(rtn, j, r)
-
-				// Append the error if needed
-				if rtn.Error != nil {
-					j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error.Error())
-				}
-
-				// return the job
-				r.Return(j)
-
-				// Flush the state
-				err := p.serializer.Serialize(*r)
-				if err != nil {
-					log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
-				}
-
-				// update the status counts
-				p.updateStatusCounts(r)
-
-				// flush out any new jobs we can
-				p.enqueueAllJobs(r)
-
-				// If the state was terminal, we should see if all of the states are terminated, if so shut down
-				if !p.allJobsAreTerminal(r) {
-					continue
-				}
-
-				// if there are any jobs in flight in the run, keep going
-				if r.JobsInFlight() {
-					continue
-				}
-
-				p.shutdown()
-
-				break
-			}
-			slog.Info("ReturnChanWorker Quit")
-			wg.Done()
+			p.returnQueue(r, &wg)
 		}()
 	})
 
@@ -210,6 +168,52 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	wg.Wait()
 
 	return nil
+}
+
+func (p *Processor[AC, OC, JC]) returnQueue(r *Run[OC, JC], wg *sync.WaitGroup) {
+	for rtn := range p.returnChan {
+		slog.Info("ReturnChan GotJobBack", "jobId", rtn.Job.Id, "state", rtn.Job.State, "kickRequests", len(rtn.KickRequests), "error", rtn.Error)
+		j := rtn.Job
+
+		// Send the new kicks if any
+		p.kickJobs(rtn, j, r)
+
+		// Append the error if needed
+		if rtn.Error != nil {
+			j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error.Error())
+		}
+
+		// return the job
+		r.Return(j)
+
+		// Flush the state
+		err := p.serializer.Serialize(*r)
+		if err != nil {
+			log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
+		}
+
+		// update the status counts
+		p.updateStatusCounts(r)
+
+		// flush out any new jobs we can
+		p.enqueueAllJobs(r)
+
+		// If the state was terminal, we should see if all of the states are terminated, if so shut down
+		if !p.allJobsAreTerminal(r) {
+			continue
+		}
+
+		// if there are any jobs in flight in the run, keep going
+		if r.JobsInFlight() {
+			continue
+		}
+
+		p.shutdown()
+
+		break
+	}
+	slog.Info("ReturnChanWorker Quit")
+	wg.Done()
 }
 
 func (p *Processor[AC, OC, JC]) updateStatusCounts(r *Run[OC, JC]) {

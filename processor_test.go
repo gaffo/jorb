@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"runtime/pprof"
 	"testing"
 	"time"
 
@@ -170,6 +171,23 @@ func (l *noopLogger) InfoCtx(ctx context.Context, msg string, args ...any) {
 }
 
 func TestProcessor_TwoTerminal(t *testing.T) {
+	f, err := os.Create("cpu.pprof")
+	require.NoError(t, err)
+	defer f.Close()
+
+	m, err := os.Create("heap.pprof")
+	require.NoError(t, err)
+	defer m.Close()
+
+	err = pprof.StartCPUProfile(f)
+	require.NoError(t, err)
+	defer pprof.StopCPUProfile()
+
+	defer func() {
+		err = pprof.WriteHeapProfile(m)
+		require.NoError(t, err)
+	}()
+
 	prev := log.Writer()
 	log.SetOutput(io.Discard)
 	defer func() {
@@ -214,10 +232,10 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
-	assert.Less(t, delta, time.Second*20, "Should take less than 20 seconds when run in parallel")
+	assert.Less(t, delta, time.Second*9, "Should take less than 9 seconds when run in parallel")
 
 	stateCount := map[string]int{}
 	for _, j := range r.Jobs {
@@ -226,6 +244,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	}
 	assert.GreaterOrEqual(t, stateCount[STATE_DONE_TWO], len(r.Jobs)/3)
 	assert.GreaterOrEqual(t, stateCount[STATE_DONE], len(r.Jobs)/3)
+	log.Printf("Total Time: %v\n", delta)
 }
 
 type testStatusListener struct {

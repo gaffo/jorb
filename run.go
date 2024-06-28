@@ -3,8 +3,8 @@ package jorb
 import (
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
+	"time"
 )
 
 // Run is basically the overall state of a given run (batch) in the processing framework
@@ -66,43 +66,46 @@ func (r *Run[OC, JC]) AddJob(jc JC) {
 func (r *Run[OC, JC]) NextJobForState(state string) (Job[JC], bool) {
 	r.m.Lock()
 	defer r.m.Unlock()
-	stateJobs := []Job[JC]{}
+
+	var minJob *Job[JC] = nil
+	var minDate *time.Time = nil
 
 	for _, j := range r.Jobs {
-		if j.State == state {
-			if r.lockedJobsById[j.Id] {
-				continue
-			}
-			stateJobs = append(stateJobs, j)
+		if j.State != state {
+			continue
 		}
+		if r.lockedJobsById[j.Id] {
+			continue
+		}
+		if j.LastUpdate == nil {
+			minJob = &j
+			break
+		}
+		if minDate == nil {
+			minDate = j.LastUpdate
+			minJob = &j
+			continue
+		}
+		if j.LastUpdate.Before(*minDate) {
+			minDate = j.LastUpdate
+			minJob = &j
+		}
+		// wasn't older
 	}
 
-	if len(stateJobs) == 0 {
+	if minJob == nil {
 		return Job[JC]{}, false
 	}
 
-	// Sort the jobs by LastEvent ascending
-	sort.Slice(stateJobs, func(i, j int) bool {
-		if stateJobs[i].LastUpdate == nil {
-			return true
-		}
-		if stateJobs[j].LastUpdate == nil {
-			return false
-		}
-		return stateJobs[i].LastUpdate.Before(*stateJobs[j].LastUpdate)
-	})
-
-	// Mark the job as locked
-	ret := stateJobs[0]
 	// lock it
-	r.lockedJobsById[ret.Id] = true
+	r.lockedJobsById[minJob.Id] = true
 	r.updateStateCounts()
 
 	// update it's last event
-	r.Jobs[ret.Id] = ret.UpdateLastEvent()
+	r.Jobs[minJob.Id] = minJob.UpdateLastEvent()
 
 	// return it
-	return r.Jobs[ret.Id], true
+	return r.Jobs[minJob.Id], true
 }
 
 func (r *Run[OC, JC]) Return(j Job[JC]) {
