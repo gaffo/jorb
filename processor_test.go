@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"log/slog"
 	"math/rand"
 	"os"
 	"runtime/pprof"
@@ -158,18 +157,6 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 	}
 }
 
-// noopLogger is a custom logger implementation that does nothing.
-type noopLogger struct{}
-
-func (l *noopLogger) Handler(h slog.Handler) slog.Handler { return h }
-func (l *noopLogger) WithAttrs(attrs []slog.Attr) *noopLogger {
-	return l
-}
-func (l *noopLogger) WithGroup(name string) *noopLogger { return l }
-func (l *noopLogger) Info(msg string, args ...any)      {}
-func (l *noopLogger) InfoCtx(ctx context.Context, msg string, args ...any) {
-}
-
 func TestProcessor_TwoTerminal(t *testing.T) {
 	f, err := os.Create("cpu.pprof")
 	require.NoError(t, err)
@@ -197,7 +184,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
-	for i := 0; i < 4000; i++ {
+	for i := 0; i < 30_000; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
 		})
@@ -270,7 +257,12 @@ func (t *testStatusListener) ExpectStatus(counts []StatusCount) {
 var _ StatusListener = &testStatusListener{}
 
 func TestProcessor_StateCallback(t *testing.T) {
-	t.Parallel()
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	defer func() {
+		log.SetOutput(prev)
+	}()
+
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
@@ -286,11 +278,11 @@ func TestProcessor_StateCallback(t *testing.T) {
 	tl.ExpectStatus([]StatusCount{
 		{
 			State: TRIGGER_STATE_NEW,
-			Count: 0,
+			Count: 1,
 		},
 		{
 			State:    STATE_DONE,
-			Count:    1,
+			Count:    0,
 			Terminal: true,
 		},
 	})

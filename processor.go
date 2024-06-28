@@ -171,27 +171,40 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 }
 
 func (p *Processor[AC, OC, JC]) returnQueue(r *Run[OC, JC], wg *sync.WaitGroup) {
-	for rtn := range p.returnChan {
-		slog.Info("ReturnChan GotJobBack", "jobId", rtn.Job.Id, "state", rtn.Job.State, "kickRequests", len(rtn.KickRequests), "error", rtn.Error)
-		j := rtn.Job
-
-		// Send the new kicks if any
-		p.kickJobs(rtn, j, r)
-
-		// Append the error if needed
-		if rtn.Error != nil {
-			j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error.Error())
+	for {
+		batch := []Return[JC]{}
+	READ_BATCH:
+		for {
+			select {
+			case rtn := <-p.returnChan:
+				batch = append(batch, rtn)
+			default:
+				break READ_BATCH
+			}
 		}
+		// Dispense with the jobs
+		for _, rtn := range batch {
+			slog.Info("ReturnChan GotJobBack", "jobId", rtn.Job.Id, "state", rtn.Job.State, "kickRequests", len(rtn.KickRequests), "error", rtn.Error)
+			j := rtn.Job
 
-		// return the job
-		r.Return(j)
+			// Send the new kicks if any
+			p.kickJobs(rtn, j, r)
+
+			// Append the error if needed
+			if rtn.Error != nil {
+				j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error.Error())
+			}
+
+			// return the job
+			r.Return(j)
+		}
+		// Now do end of batch work
 
 		// Flush the state
 		err := p.serializer.Serialize(*r)
 		if err != nil {
 			log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
 		}
-
 		// update the status counts
 		p.updateStatusCounts(r)
 
@@ -202,7 +215,6 @@ func (p *Processor[AC, OC, JC]) returnQueue(r *Run[OC, JC], wg *sync.WaitGroup) 
 		if !p.allJobsAreTerminal(r) {
 			continue
 		}
-
 		// if there are any jobs in flight in the run, keep going
 		if r.JobsInFlight() {
 			continue
@@ -239,19 +251,16 @@ func (p *Processor[AC, OC, JC]) updateStatusCounts(r *Run[OC, JC]) {
 }
 
 func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
-	allTerminal := true
-	for _, j := range r.Jobs {
-		// TODO: Refactor this to be a method on Job that takes the state map
-		if !p.stateMap[j.State].Terminal {
-			slog.Info("Job not terminal",
-				"job", j.Id,
-				"state", j.State,
-			)
-			allTerminal = false
-			break
+	c := r.StatusCounts()
+	for _, k := range p.states {
+		if k.Terminal {
+			continue
+		}
+		if c[k.TriggerState].Count > 0 {
+			return false
 		}
 	}
-	return allTerminal
+	return true
 }
 
 func (p *Processor[AC, OC, JC]) enqueueAllJobs(r *Run[OC, JC]) {
