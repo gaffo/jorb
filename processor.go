@@ -306,25 +306,26 @@ func (p *Processor[AC, OC, JC]) shutdown() {
 }
 
 func (p *Processor[AC, OC, JC]) kickJobs(rtn Return[JC], j Job[JC], r *Run[OC, JC]) {
-	if rtn.KickRequests != nil {
-		for _, k := range rtn.KickRequests {
-			// create a new job with the right state
-			newJob := Job[JC]{
-				Id:          fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
-				C:           k.C,
-				State:       k.State,
-				StateErrors: map[string][]string{},
-			}
-
-			// validate it
-			_, ok := p.stateMap[newJob.State]
-			if !ok {
-				log.Fatal(p.invalidStateError(newJob.State))
-			}
-
-			// return it to the run, it'll get re-enqueued by the main return loop
-			r.Return(newJob)
+	if rtn.KickRequests == nil {
+		return
+	}
+	for _, k := range rtn.KickRequests {
+		// create a new job with the right state
+		newJob := Job[JC]{
+			Id:          fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
+			C:           k.C,
+			State:       k.State,
+			StateErrors: map[string][]string{},
 		}
+
+		// validate it
+		_, ok := p.stateMap[newJob.State]
+		if !ok {
+			log.Fatal(p.invalidStateError(newJob.State))
+		}
+
+		// return it to the run, it'll get re-enqueued by the main return loop
+		r.Return(newJob)
 	}
 }
 
