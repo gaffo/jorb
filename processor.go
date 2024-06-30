@@ -329,32 +329,53 @@ func (p *Processor[AC, OC, JC]) kickJobs(rtn Return[JC], j Job[JC], r *Run[OC, J
 	}
 }
 
+type StateExec[AC any, OC any, JC any] struct {
+	State      State[AC, OC, JC]
+	i          int
+	wg         sync.WaitGroup
+	c          chan Job[JC]
+	Overall    OC
+	ctx        context.Context
+	returnChan chan Return[JC]
+	ac         AC
+}
+
+func (s *StateExec[AC, OC, JC]) Run() {
+	slog.Info("Starting worker", "worker", s.i, "state", s.State.TriggerState)
+	for j := range s.c {
+		if s.State.RateLimit != nil {
+			s.State.RateLimit.Wait(s.ctx)
+			slog.Info("LimiterAllowed", "worker", s.i, "state", s.State.TriggerState, "job", j.Id)
+		}
+		// Execute the job
+		rtn := Return[JC]{}
+		slog.Info("Executing job", "job", j.Id, "state", s.State.TriggerState)
+		j.C, j.State, rtn.KickRequests, rtn.Error = s.State.Exec(s.ctx, s.ac, s.Overall, j.C)
+		slog.Info("Execution complete", "job", j.Id, "state", s.State.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
+
+		rtn.Job = j
+		//go func() {
+		slog.Info("Returning job", "job", j.Id, "newState", j.State)
+		s.returnChan <- rtn
+		slog.Info("Returned job", "job", j.Id, "newState", j.State)
+		//}()
+	}
+	s.wg.Done()
+	slog.Info("Stopped worker", "worker", s.i, "state", s.State.TriggerState)
+}
+
 func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], i int, wg sync.WaitGroup) func() {
 	wg.Add(1)
-	return func() {
-		slog.Info("Starting worker", "worker", i, "state", s.TriggerState)
-		c := p.stateChan[s.TriggerState]
-		for j := range c {
-			if s.RateLimit != nil {
-				s.RateLimit.Wait(ctx)
-				slog.Info("LimiterAllowed", "worker", i, "state", s.TriggerState, "job", j.Id)
-			}
-			// Execute the job
-			rtn := Return[JC]{}
-			slog.Info("Executing job", "job", j.Id, "state", s.TriggerState)
-			j.C, j.State, rtn.KickRequests, rtn.Error = s.Exec(ctx, p.appContext, r.Overall, j.C)
-			slog.Info("Execution complete", "job", j.Id, "state", s.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
-
-			rtn.Job = j
-			//go func() {
-			slog.Info("Returning job", "job", j.Id, "newState", j.State)
-			p.returnChan <- rtn
-			slog.Info("Returned job", "job", j.Id, "newState", j.State)
-			//}()
-		}
-		wg.Done()
-		slog.Info("Stopped worker", "worker", i, "state", s.TriggerState)
+	e := &StateExec[AC, OC, JC]{
+		State:      s,
+		i:          i,
+		wg:         wg,
+		c:          p.stateChan[s.TriggerState],
+		ctx:        ctx,
+		returnChan: p.returnChan,
+		ac:         p.appContext,
 	}
+	return e.Run
 }
 
 func (p *Processor[AC, OC, JC]) invalidStateError(s string) error {
