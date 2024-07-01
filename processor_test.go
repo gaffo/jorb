@@ -2,6 +2,7 @@ package jorb
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"io"
 	"log"
@@ -45,7 +46,7 @@ func TestProcessorOneJob(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessorOneJob", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -86,7 +87,7 @@ func TestProcessorAllTerminal(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessorAllTerminal", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -112,7 +113,7 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessorTwoSequentialJobs", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -183,7 +184,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	//t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_TwoTerminal", oc)
 	for i := 0; i < 30_000; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -193,8 +194,12 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
-				time.Sleep(time.Millisecond * time.Duration(rand.Intn(1000)))
+				//time.Sleep(time.Millisecond * time.Duration(rand.Intn(1000)))
 				jc.Count += 1
+				m := md5.New()
+				for i := 0; i < 5000; i++ {
+					m.Sum([]byte("HELLO_WORLD"))
+				}
 				c := rand.Intn(2) == 0
 				if c {
 					return jc, STATE_DONE, nil, nil
@@ -265,7 +270,7 @@ func TestProcessor_StateCallback(t *testing.T) {
 
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_StateCallback", oc)
 	for i := 0; i < 1; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -323,7 +328,7 @@ func TestProcessor_Retries(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_Retries", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -371,7 +376,7 @@ func TestProcessor_RateLimiter(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_RateLimiter", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -431,7 +436,7 @@ func TestProcessor_RateLimiterSlows(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_RateLimiterSlows", oc)
 	for i := 0; i < 3; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -476,7 +481,7 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_LoopWithExit", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -540,7 +545,7 @@ func TestProcessor_Serialization(t *testing.T) {
 
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_Serialization", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -598,7 +603,7 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r := NewRun[MyOverallContext, MyJobContext]("TestProcessor_FirstStepExpands", oc)
 	for i := 0; i < 10; i++ {
 		jobContext := MyJobContext{
 			Count:      0,

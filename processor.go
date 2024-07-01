@@ -341,27 +341,32 @@ type StateExec[AC any, OC any, JC any] struct {
 }
 
 func (s *StateExec[AC, OC, JC]) Run() {
-	slog.Info("Starting worker", "worker", s.i, "state", s.State.TriggerState)
-	for j := range s.c {
-		if s.State.RateLimit != nil {
-			s.State.RateLimit.Wait(s.ctx)
-			slog.Info("LimiterAllowed", "worker", s.i, "state", s.State.TriggerState, "job", j.Id)
-		}
-		// Execute the job
-		rtn := Return[JC]{}
-		slog.Info("Executing job", "job", j.Id, "state", s.State.TriggerState)
-		j.C, j.State, rtn.KickRequests, rtn.Error = s.State.Exec(s.ctx, s.ac, s.Overall, j.C)
-		slog.Info("Execution complete", "job", j.Id, "state", s.State.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
+	pprof.Do(s.ctx, pprof.Labels("function", "StateExec::Run", "worker", fmt.Sprintf("%d", s.i), "state", s.State.TriggerState), func(ctx context.Context) {
+		slog.Info("Starting worker", "worker", s.i, "state", s.State.TriggerState)
+		for j := range s.c {
+			pprof.Do(ctx, pprof.Labels("segment", "RateLimitWait"), func(ctx context.Context) {
+				if s.State.RateLimit != nil {
+					s.State.RateLimit.Wait(s.ctx)
+					slog.Info("LimiterAllowed", "worker", s.i, "state", s.State.TriggerState, "job", j.Id)
+				}
+			})
+			// Execute the job
+			rtn := Return[JC]{}
+			slog.Info("Executing job", "job", j.Id, "state", s.State.TriggerState)
+			pprof.Do(s.ctx, pprof.Labels("segment", "Exec"), func(ctx context.Context) {
+				j.C, j.State, rtn.KickRequests, rtn.Error = s.State.Exec(s.ctx, s.ac, s.Overall, j.C)
+			})
+			slog.Info("Execution complete", "job", j.Id, "state", s.State.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
 
-		rtn.Job = j
-		//go func() {
-		slog.Info("Returning job", "job", j.Id, "newState", j.State)
-		s.returnChan <- rtn
-		slog.Info("Returned job", "job", j.Id, "newState", j.State)
-		//}()
-	}
-	s.wg.Done()
-	slog.Info("Stopped worker", "worker", s.i, "state", s.State.TriggerState)
+			rtn.Job = j
+			slog.Info("Returning job", "job", j.Id, "newState", j.State)
+			pprof.Do(s.ctx, pprof.Labels("segment", "returnChanSend"), func(ctx context.Context) {
+				s.returnChan <- rtn
+			})
+		}
+		s.wg.Done()
+		slog.Info("Stopped worker", "worker", s.i, "state", s.State.TriggerState)
+	})
 }
 
 func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], i int, wg sync.WaitGroup) func() {

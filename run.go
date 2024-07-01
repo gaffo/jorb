@@ -2,10 +2,50 @@ package jorb
 
 import (
 	"fmt"
+	"github.com/grafana/pyroscope-go"
 	"log/slog"
+	"runtime"
 	"sort"
 	"sync"
+	"time"
 )
+
+func (r *Run[OC, JC]) initPyro() {
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+	if r.Name == "" {
+		r.Name = "jorb"
+	}
+	pyroscope.Start(pyroscope.Config{
+		ApplicationName: r.Name,
+		UploadRate:      time.Second,
+
+		// replace this with the address of pyroscope server
+		ServerAddress: "http://localhost:4040",
+
+		// you can disable logging by setting this to nil
+		Logger: pyroscope.StandardLogger,
+
+		// you can provide static tags via a map:
+		Tags: map[string]string{"JORB": "JORB"},
+
+		ProfileTypes: []pyroscope.ProfileType{
+			// these profile types are enabled by default:
+			pyroscope.ProfileCPU,
+			pyroscope.ProfileAllocObjects,
+			pyroscope.ProfileAllocSpace,
+			pyroscope.ProfileInuseObjects,
+			pyroscope.ProfileInuseSpace,
+
+			// these profile types are optional:
+			pyroscope.ProfileGoroutines,
+			pyroscope.ProfileMutexCount,
+			pyroscope.ProfileMutexDuration,
+			pyroscope.ProfileBlockCount,
+			pyroscope.ProfileBlockDuration,
+		},
+	})
+}
 
 // Run is basically the overall state of a given run (batch) in the processing framework
 // it's meant to be re-entrant, eg if you kill the processor and you have a serializaer, you can
@@ -38,6 +78,8 @@ func NewRun[OC any, JC any](name string, oc OC) *Run[OC, JC] {
 func (r *Run[OC, JC]) Init() {
 	r.m.Lock()
 	defer r.m.Unlock()
+	r.initPyro()
+
 	r.lockedJobsById = map[string]string{}
 	r.lockedJobsStateCount = map[string]int{}
 	r.stateCount = map[string][]Job[JC]{}
