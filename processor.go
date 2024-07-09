@@ -98,6 +98,9 @@ func (p *Processor[AC, OC, JC]) init() error {
 		if !s.Terminal && s.Exec == nil {
 			return fmt.Errorf("State %s is non-terminal but has no Exec function", s.TriggerState)
 		}
+		if !s.Terminal && p.ValidateExitStates && len(s.ExitStates) == 0 {
+			return fmt.Errorf("ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates", s.TriggerState)
+		}
 	}
 
 	if p.serializer == nil {

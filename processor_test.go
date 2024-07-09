@@ -724,7 +724,7 @@ func TestProcessor_ValidateExits_NonTerminal_NoExitStates(t *testing.T) {
 	p.ValidateExitStates = true
 	r := NewRun[MyOverallContext, MyJobContext]("name", MyOverallContext{})
 	err := p.Exec(context.Background(), r)
-	require.Errorf(t, err, "ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates")
+	require.ErrorContains(t, err, fmt.Sprintf("ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates", TRIGGER_STATE_NEW))
 }
 
 func TestProcessor_NonTerminal_NoExitFunction(t *testing.T) {
@@ -739,4 +739,29 @@ func TestProcessor_NonTerminal_NoExitFunction(t *testing.T) {
 	r := NewRun[MyOverallContext, MyJobContext]("name", MyOverallContext{})
 	err := p.Exec(context.Background(), r)
 	require.ErrorContains(t, err, fmt.Sprintf("State %s is non-terminal but has no Exec function", TRIGGER_STATE_NEW))
+}
+
+func TestProcessor_ValidateExitStates_InvalidExit(t *testing.T) {
+	t.Parallel()
+	uknownState := "UNKNOWN_EXIT_STATE"
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, uknownState, nil, nil
+			},
+			Terminal:   false,
+			ExitStates: []string{TRIGGER_STATE_NEW},
+		},
+		{
+			TriggerState: uknownState,
+			Terminal:     true,
+		},
+	}
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	p.ValidateExitStates = true
+	r := NewRun[MyOverallContext, MyJobContext]("name", MyOverallContext{})
+	r.AddJob(MyJobContext{})
+	err := p.Exec(context.Background(), r)
+	require.ErrorContains(t, err, fmt.Sprintf("invalid exit state [%s] for state %s", uknownState, TRIGGER_STATE_NEW))
 }
