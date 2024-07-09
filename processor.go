@@ -88,10 +88,18 @@ type Return[JC any] struct {
 	Error        error
 }
 
-func (p *Processor[AC, OC, JC]) init() {
+func (p *Processor[AC, OC, JC]) init() error {
 	if p.initted {
-		return
+		return nil
 	}
+
+	// validate the states
+	for _, s := range p.states {
+		if !s.Terminal && s.Exec == nil {
+			return fmt.Errorf("State %s is non-terminal but has no Exec function", s.TriggerState)
+		}
+	}
+
 	if p.serializer == nil {
 		p.serializer = &NilSerializer[OC, JC]{}
 	}
@@ -124,11 +132,15 @@ func (p *Processor[AC, OC, JC]) init() {
 
 	// When a job changes state, we send it to this channel to centrally manage and re-queue
 	p.returnChan = make(chan Return[JC], totalConcurrency*2) // make it the size of the total amount of in flight jobs we could have so that each worker can return a task
+	return nil
 }
 
 // Exec this big work function, this does all the crunching
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
-	p.init()
+	err := p.init()
+	if err != nil {
+		return err
+	}
 
 	if p.allJobsAreTerminal(r) {
 		slog.Info("AllJobsTerminal")

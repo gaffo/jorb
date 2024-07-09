@@ -738,5 +738,5 @@ func TestProcessor_NonTerminal_NoExitFunction(t *testing.T) {
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
 	r := NewRun[MyOverallContext, MyJobContext]("name", MyOverallContext{})
 	err := p.Exec(context.Background(), r)
-	require.Errorf(t, err, "State %s is non-terminal but has no Exec function", TRIGGER_STATE_NEW)
+	require.ErrorContains(t, err, fmt.Sprintf("State %s is non-terminal but has no Exec function", TRIGGER_STATE_NEW))
 }
