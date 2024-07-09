@@ -41,6 +41,13 @@ const (
 	STATE_DONE_TWO = "done_two"
 )
 
+func TestMain(m *testing.M) {
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	m.Run()
+	log.SetOutput(prev)
+}
+
 func TestProcessorOneJob(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
@@ -173,12 +180,6 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	defer func() {
 		err = pprof.WriteHeapProfile(m)
 		require.NoError(t, err)
-	}()
-
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
-	defer func() {
-		log.SetOutput(prev)
 	}()
 	//t.Parallel()
 	oc := MyOverallContext{}
@@ -706,4 +707,36 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 	}
 	assert.Equal(t, 10, stateCount[STATE_DONE])
 	assert.Equal(t, 10*10, stateCount[STATE_DONE_TWO])
+}
+
+func TestProcessor_ValidateExits_NonTerminal_NoExitStates(t *testing.T) {
+	t.Parallel()
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, TRIGGER_STATE_NEW, nil, nil
+			},
+			Terminal: false,
+		},
+	}
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	p.ValidateExitStates = true
+	r := NewRun[MyOverallContext, MyJobContext]("name", MyOverallContext{})
+	err := p.Exec(context.Background(), r)
+	require.Errorf(t, err, "ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates")
+}
+
+func TestProcessor_NonTerminal_NoExitFunction(t *testing.T) {
+	t.Parallel()
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Terminal:     false,
+		},
+	}
+	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	r := NewRun[MyOverallContext, MyJobContext]("name", MyOverallContext{})
+	err := p.Exec(context.Background(), r)
+	require.Errorf(t, err, "State %s is non-terminal but has no Exec function", TRIGGER_STATE_NEW)
 }

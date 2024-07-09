@@ -38,6 +38,9 @@ type State[AC any, OC any, JC any] struct {
 
 	// RateLimit is an optional rate limiter for controlling the execution rate of this state. Useful when calling rate limited apis.
 	RateLimit *rate.Limiter
+
+	// A list of valid exit states for use when in validation mode on the processor
+	ExitStates []string
 }
 
 // KickRequest struct is a job context with a requested state that the
@@ -56,15 +59,16 @@ type StatusCount struct {
 
 // Processor executes a job
 type Processor[AC any, OC any, JC any] struct {
-	appContext     AC
-	states         []State[AC, OC, JC]
-	serializer     Serializer[OC, JC]
-	statusListener StatusListener
-	initted        bool
-	stateMap       map[string]State[AC, OC, JC]
-	stateNames     []string
-	stateChan      map[string]chan Job[JC]
-	returnChan     chan Return[JC]
+	appContext         AC
+	states             []State[AC, OC, JC]
+	serializer         Serializer[OC, JC]
+	statusListener     StatusListener
+	initted            bool
+	stateMap           map[string]State[AC, OC, JC]
+	stateNames         []string
+	stateChan          map[string]chan Job[JC]
+	returnChan         chan Return[JC]
+	ValidateExitStates bool
 }
 
 func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) *Processor[AC, OC, JC] {
