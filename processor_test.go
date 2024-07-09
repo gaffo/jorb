@@ -571,6 +571,7 @@ func TestProcessor_Serialization(t *testing.T) {
 
 	tempFile, err := os.CreateTemp("", "state-*.json.tmp")
 	require.NoError(t, err)
+
 	defer os.Remove(tempFile.Name())
 
 	serialzer := NewJsonSerializer[MyOverallContext, MyJobContext](tempFile.Name())
