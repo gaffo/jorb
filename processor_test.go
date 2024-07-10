@@ -741,6 +741,10 @@ func TestProcessor_NonTerminal_NoExitFunction(t *testing.T) {
 	require.ErrorContains(t, err, fmt.Sprintf("State %s is non-terminal but has no Exec function", TRIGGER_STATE_NEW))
 }
 
+func TestProcessor_ValidExitStates_ContainingSelf_CantBeOnlyState(t *testing.T) {
+	t.Fatal("NYI")
+}
+
 func TestProcessor_ValidateExitStates_InvalidExit(t *testing.T) {
 	t.Parallel()
 	uknownState := "UNKNOWN_EXIT_STATE"
@@ -751,11 +755,7 @@ func TestProcessor_ValidateExitStates_InvalidExit(t *testing.T) {
 				return jc, uknownState, nil, nil
 			},
 			Terminal:   false,
-			ExitStates: []string{TRIGGER_STATE_NEW},
-		},
-		{
-			TriggerState: uknownState,
-			Terminal:     true,
+			ExitStates: []string{uknownState},
 		},
 	}
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)

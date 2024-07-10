@@ -93,16 +93,6 @@ func (p *Processor[AC, OC, JC]) init() error {
 		return nil
 	}
 
-	// validate the states
-	for _, s := range p.states {
-		if !s.Terminal && s.Exec == nil {
-			return fmt.Errorf("State %s is non-terminal but has no Exec function", s.TriggerState)
-		}
-		if !s.Terminal && p.ValidateExitStates && len(s.ExitStates) == 0 {
-			return fmt.Errorf("ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates", s.TriggerState)
-		}
-	}
-
 	if p.serializer == nil {
 		p.serializer = &NilSerializer[OC, JC]{}
 	}
@@ -118,6 +108,26 @@ func (p *Processor[AC, OC, JC]) init() error {
 	p.stateNames = make([]string, 0, len(p.stateMap))
 	for k := range p.stateMap {
 		p.stateNames = append(p.stateNames, k)
+	}
+
+	// validate the states
+	for _, s := range p.states {
+		if !s.Terminal && s.Exec == nil {
+			return fmt.Errorf("State %s is non-terminal but has no Exec function", s.TriggerState)
+		}
+		if p.ValidateExitStates {
+			if s.Terminal {
+				continue
+			}
+			if len(s.ExitStates) == 0 {
+				return fmt.Errorf("ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates", s.TriggerState)
+			}
+			for _, exit := range s.ExitStates {
+				if _, ok := p.stateMap[exit]; !ok {
+					return fmt.Errorf("invalid exit state [%s] for state %s", exit, s.TriggerState)
+				}
+			}
+		}
 	}
 
 	// For each state, we need a channel of jobs
