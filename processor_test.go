@@ -41,6 +41,13 @@ const (
 	STATE_DONE_TWO = "done_two"
 )
 
+func TestMain(m *testing.M) {
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	m.Run()
+	log.SetOutput(prev)
+}
+
 func TestProcessorOneJob(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
@@ -51,8 +58,8 @@ func TestProcessorOneJob(t *testing.T) {
 			Count: 0,
 		})
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -62,17 +69,18 @@ func TestProcessorOneJob(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -92,17 +100,18 @@ func TestProcessorAllTerminal(t *testing.T) {
 			Count: 0,
 		})
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -118,8 +127,8 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 			Count: 0,
 		})
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -128,7 +137,7 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_MIDDLE,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -137,17 +146,18 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -174,12 +184,6 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 		err = pprof.WriteHeapProfile(m)
 		require.NoError(t, err)
 	}()
-
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
-	defer func() {
-		log.SetOutput(prev)
-	}()
 	//t.Parallel()
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
@@ -189,8 +193,8 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 			Count: 0,
 		})
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				time.Sleep(time.Millisecond * time.Duration(rand.Intn(1000)))
@@ -204,17 +208,18 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 1000,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE_TWO,
 			Exec:         nil,
 			Terminal:     true,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
@@ -324,8 +329,8 @@ func TestProcessor_StateCallback(t *testing.T) {
 		},
 	})
 
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				//log.Println("Processing New")
@@ -336,17 +341,18 @@ func TestProcessor_StateCallback(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, tl)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -366,8 +372,8 @@ func TestProcessor_Retries(t *testing.T) {
 			Count: 0,
 		})
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count++
@@ -379,17 +385,18 @@ func TestProcessor_Retries(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -421,8 +428,8 @@ func TestProcessor_RateLimiter(t *testing.T) {
 	// and fire pretty much immediately, so we shoudl come in just shy of 3 seconds
 	// running 10 jobs with a rate limit of every 100 milliseconds with 10 concurrent
 	// actors which is a lot faster than 2 * 1 * 10 = 20 seconds
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -433,7 +440,7 @@ func TestProcessor_RateLimiter(t *testing.T) {
 			Concurrency: 10,
 			RateLimit:   rate.NewLimiter(10, 1),
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_MIDDLE,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -444,17 +451,18 @@ func TestProcessor_RateLimiter(t *testing.T) {
 			Concurrency: 10,
 			RateLimit:   rate.NewLimiter(10, 1),
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*4)
@@ -476,8 +484,8 @@ func TestProcessor_RateLimiterSlows(t *testing.T) {
 	}
 	concurrency := 2
 	seconds := 1.0
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -487,17 +495,18 @@ func TestProcessor_RateLimiterSlows(t *testing.T) {
 			Concurrency: concurrency,                                                        // When we have multiple workers we might have multiple limiters
 			RateLimit:   rate.NewLimiter(rate.Every(time.Second*time.Duration(seconds)), 1), // Every 5 seconds
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	jobCount := len(r.Jobs)
@@ -519,8 +528,8 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 			Count: 0,
 		})
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -529,7 +538,7 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_MIDDLE,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count += 1
@@ -541,17 +550,18 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -583,8 +593,8 @@ func TestProcessor_Serialization(t *testing.T) {
 			Count: 0,
 		})
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				//log.Println("Processing New")
@@ -595,12 +605,13 @@ func TestProcessor_Serialization(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer, nil)
 
@@ -647,9 +658,9 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 		}
 		r.AddJob(jobContext)
 	}
-	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+	states, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
 		// This state generates a list of job requests
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				newJobs := []KickRequest[MyJobContext]{}
@@ -666,7 +677,7 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_MIDDLE,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 				jc.Count = len(jc.String)
@@ -675,22 +686,23 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 			Terminal:    false,
 			Concurrency: 10,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE,
 			Exec:         nil,
 			Terminal:     true,
 		},
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
 			TriggerState: STATE_DONE_TWO,
 			Exec:         nil,
 			Terminal:     true,
 		},
-	}
+	}, false)
+	require.NoError(t, err)
 
 	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -706,4 +718,60 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 	}
 	assert.Equal(t, 10, stateCount[STATE_DONE])
 	assert.Equal(t, 10*10, stateCount[STATE_DONE_TWO])
+}
+
+func TestProcessor_ValidateExits_NonTerminal_NoExitStates(t *testing.T) {
+	t.Parallel()
+	_, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, TRIGGER_STATE_NEW, nil, nil
+			},
+			Terminal: false,
+		},
+	}, true)
+	require.ErrorContains(t, err, fmt.Sprintf("ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates", TRIGGER_STATE_NEW))
+}
+
+func TestProcessor_NonTerminal_NoExitFunction(t *testing.T) {
+	t.Parallel()
+	_, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Terminal:     false,
+		},
+	}, true)
+	require.ErrorContains(t, err, fmt.Sprintf("State %s is non-terminal but has no Exec function", TRIGGER_STATE_NEW))
+}
+
+func TestProcessor_ValidExitStates_ContainingSelf_CantBeOnlyState(t *testing.T) {
+	t.Parallel()
+	_, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, TRIGGER_STATE_NEW, nil, nil
+			},
+			ExitStates: []string{TRIGGER_STATE_NEW},
+			Terminal:   false,
+		},
+	}, true)
+	require.ErrorContains(t, err, fmt.Sprintf("ValidateExitStates: invalid State machine, state %s is non-terminal but has no ExitStates other than self", TRIGGER_STATE_NEW))
+}
+
+func TestProcessor_ValidateExitStates_InvalidExit(t *testing.T) {
+	t.Parallel()
+	uknownState := "UNKNOWN_EXIT_STATE"
+	_, err := NewStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, uknownState, nil, nil
+			},
+			Terminal:   false,
+			ExitStates: []string{uknownState},
+		},
+	}, true)
+	require.ErrorContains(t, err, fmt.Sprintf("invalid exit state [%s] for state %s", uknownState, TRIGGER_STATE_NEW))
 }
