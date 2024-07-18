@@ -69,8 +69,7 @@ func (r *Run[OC, JC]) Init() {
 	}
 }
 
-// Add a job to the pool, this shouldn't be called once it's running
-func (r *Run[OC, JC]) AddJob(jc JC) {
+func (r *Run[OC, JC]) AddJobWithState(jc JC, state string) {
 	r.m.Lock()
 	defer r.m.Unlock()
 
@@ -79,7 +78,7 @@ func (r *Run[OC, JC]) AddJob(jc JC) {
 	j := Job[JC]{
 		Id:          id,
 		C:           jc,
-		State:       TRIGGER_STATE_NEW,
+		State:       state,
 		StateErrors: map[string][]string{},
 	}
 	j.UpdateLastEvent()
@@ -88,6 +87,11 @@ func (r *Run[OC, JC]) AddJob(jc JC) {
 
 	slog.Info("AddJob", "run", r.Name, "job", j, "totalJobs", len(r.Jobs))
 	r.Jobs[id] = j
+}
+
+// Add a job to the pool, this shouldn't be called once it's running
+func (r *Run[OC, JC]) AddJob(jc JC) {
+	r.AddJobWithState(jc, TRIGGER_STATE_NEW)
 }
 
 func (r *Run[OC, JC]) NextJobForState(state string) (Job[JC], bool) {

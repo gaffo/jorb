@@ -152,3 +152,18 @@ func TestRun_JobsInFlight2(t *testing.T) {
 	r.Return(j)
 	require.False(t, r.JobsInFlight())
 }
+
+func Test_AddJobWithState(t *testing.T) {
+	t.Parallel()
+	r := NewRun[MyOverallContext, MyJobContext]("job", MyOverallContext{})
+	r.AddJobWithState(MyJobContext{Count: 0}, "other_state")
+	assert.Equal(t, map[string]StatusCount{
+		"other_state": {
+			State:     "other_state",
+			Count:     1,
+			Executing: 0,
+		},
+	}, r.StatusCounts())
+	assert.Equal(t, 1, len(r.Jobs))
+	assert.Equal(t, "other_state", r.Jobs["0"].State)
+}
