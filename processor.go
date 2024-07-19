@@ -6,7 +6,7 @@ import (
 	"log"
 	"log/slog"
 	"runtime/pprof"
-	"strings"
+	"sort"
 	"sync"
 
 	"golang.org/x/time/rate"
@@ -49,22 +49,34 @@ type KickRequest[JC any] struct {
 
 type StatusCount struct {
 	State     string
-	Count     int
+	Completed int
 	Executing int
+	Waiting   int
 	Terminal  bool
 }
 
 // Processor executes a job
 type Processor[AC any, OC any, JC any] struct {
-	appContext     AC
-	states         []State[AC, OC, JC]
-	serializer     Serializer[OC, JC]
-	statusListener StatusListener
-	initted        bool
-	stateMap       map[string]State[AC, OC, JC]
-	stateNames     []string
-	stateChan      map[string]chan Job[JC]
-	returnChan     chan Return[JC]
+	appContext          AC
+	states              []State[AC, OC, JC]
+	serializer          Serializer[OC, JC]
+	statusListener      StatusListener
+	sortedStateNames    []string
+	stateMap            map[string]State[AC, OC, JC]
+	stateStatusMap      map[string]*StatusCount
+	stateWaitingJobsMap map[string][]Job[JC]
+	stateChan           map[string]chan Job[JC]
+	returnChan          chan Return[JC]
+	wg                  sync.WaitGroup
+}
+
+// Return is a struct that contains a job and a list of kick requests
+// that is used for returning job updates to the system
+type Return[JC any] struct {
+	PriorState   string
+	Job          Job[JC]
+	KickRequests []KickRequest[JC]
+	Error        error
 }
 
 func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) *Processor[AC, OC, JC] {
@@ -76,18 +88,26 @@ func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], ser
 	}
 }
 
-// Return is a struct that contains a job and a list of kick requests
-// that is used for returning job updates to the system
-type Return[JC any] struct {
-	Job          Job[JC]
-	KickRequests []KickRequest[JC]
-	Error        error
+func (p *Processor[AC, OC, JC]) validate(states []State[AC, OC, JC]) error {
+	for _, state := range states {
+		if state.Terminal {
+			if state.Concurrency < 0 {
+				return fmt.Errorf("terminal state %s has negative concurrency", state.TriggerState)
+			}
+		} else {
+			if state.Concurrency < 1 {
+				return fmt.Errorf("non-terminal state %s has non-positive concurrency", state.TriggerState)
+			}
+			if state.Exec == nil {
+				return fmt.Errorf("non-terminal state %s but has no Exec function", state.TriggerState)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (p *Processor[AC, OC, JC]) init() {
-	if p.initted {
-		return
-	}
 	if p.serializer == nil {
 		p.serializer = &NilSerializer[OC, JC]{}
 	}
@@ -96,34 +116,36 @@ func (p *Processor[AC, OC, JC]) init() {
 	}
 	// Make a map of triggers to states so we can easily reference it
 	p.stateMap = map[string]State[AC, OC, JC]{}
-	for _, s := range p.states {
-		p.stateMap[s.TriggerState] = s
-	}
-	// get a list of return state names for use
-	p.stateNames = make([]string, 0, len(p.stateMap))
-	for k := range p.stateMap {
-		p.stateNames = append(p.stateNames, k)
-	}
-
-	// For each state, we need a channel of jobs
+	p.stateStatusMap = map[string]*StatusCount{}
+	p.stateWaitingJobsMap = map[string][]Job[JC]{}
 	p.stateChan = map[string]chan Job[JC]{}
+	p.sortedStateNames = []string{}
 
-	// Create the state chans
-	totalConcurrency := 0
 	for _, s := range p.states {
-		if s.Terminal {
-			continue
+		stateName := s.TriggerState
+
+		p.sortedStateNames = append(p.sortedStateNames, stateName)
+		p.stateMap[stateName] = s
+		p.stateStatusMap[stateName] = &StatusCount{
+			State:    stateName,
+			Terminal: s.Terminal,
 		}
-		p.stateChan[s.TriggerState] = make(chan Job[JC], s.Concurrency) // make a chan
-		totalConcurrency += s.Concurrency
+		// This is by-design unbuffered
+		p.stateChan[stateName] = make(chan Job[JC])
 	}
 
-	// When a job changes state, we send it to this channel to centrally manage and re-queue
-	p.returnChan = make(chan Return[JC], totalConcurrency*2) // make it the size of the total amount of in flight jobs we could have so that each worker can return a task
+	sort.Strings(p.sortedStateNames)
+
+	// This is by-design unbuffered
+	p.returnChan = make(chan Return[JC])
 }
 
 // Exec this big work function, this does all the crunching
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
+	if err := p.validate(p.states); err != nil {
+		return err
+	}
+
 	p.init()
 
 	if p.allJobsAreTerminal(r) {
@@ -131,169 +153,156 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 		return nil
 	}
 
-	wg := sync.WaitGroup{}
-
 	// create the workers
 	for _, s := range p.states {
 		// Terminal states don't need to recieve jobs, they're just done
 		if s.Terminal {
 			continue
 		}
-		if s.Exec == nil {
-			return p.invalidStateError(s.TriggerState)
-		}
-
-		concurrency := s.Concurrency
 
 		// Make workers for each, they just process and fire back to the central channel
-		for i := 0; i < concurrency; i++ { // add a waiter for every go processor, do it before forking
-			labels := pprof.Labels("type", "jorbWorker", "state", s.TriggerState, "id", fmt.Sprintf("%d", i))
-			pprof.Do(ctx, labels, func(_ context.Context) {
-				go p.execFunc(ctx, r, s, i, wg)()
+		for i := 0; i < s.Concurrency; i++ {
+			p.wg.Add(1)
+			pprof.Do(ctx, pprof.Labels("type", "worker", "state", s.TriggerState, "id", fmt.Sprintf("%d", i)), func(ctx context.Context) {
+				go p.execFunc(ctx, s, r.Overall, i, &p.wg)()
 			})
 		}
 	}
 
-	go func() { p.enqueueAllJobs(r) }() // fill all the outbound queues once in a seperate goroutine to prime the pump faster
-
-	// Make a central processor and start it
-	wg.Add(1)
-	pprof.Do(ctx, pprof.Labels("type", "ReturnChanWorker"), func(_ context.Context) {
-		go func() {
-			p.returnQueue(r, &wg)
-		}()
+	pprof.Do(ctx, pprof.Labels("type", "main"), func(ctx context.Context) {
+		p.wg.Add(1)
+		go p.process(ctx, r, &p.wg)
 	})
 
-	// Wait for all of the processors to quit
-	wg.Wait()
-
+	p.wg.Wait()
 	return nil
 }
 
-func (p *Processor[AC, OC, JC]) returnQueue(r *Run[OC, JC], wg *sync.WaitGroup) {
-	for {
-		batch := []Return[JC]{}
-	READ_BATCH:
-		for {
-			select {
-			case rtn := <-p.returnChan:
-				batch = append(batch, rtn)
-			default:
-				break READ_BATCH
-			}
-		}
-		// Dispense with the jobs
-		for _, rtn := range batch {
-			slog.Info("ReturnChan GotJobBack", "jobId", rtn.Job.Id, "state", rtn.Job.State, "kickRequests", len(rtn.KickRequests), "error", rtn.Error)
-			j := rtn.Job
-
-			// Send the new kicks if any
-			p.kickJobs(rtn, j, r)
-
-			// Append the error if needed
-			if rtn.Error != nil {
-				j.StateErrors[j.State] = append(j.StateErrors[j.State], rtn.Error.Error())
-			}
-
-			// return the job
-			r.Return(j)
-		}
-		// Now do end of batch work
-
-		// Flush the state
-		err := p.serializer.Serialize(*r)
-		if err != nil {
-			log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
-		}
-		// update the status counts
-		p.updateStatusCounts(r)
-
-		// flush out any new jobs we can
-		p.enqueueAllJobs(r)
-
-		// If the state was terminal, we should see if all of the states are terminated, if so shut down
-		if !p.allJobsAreTerminal(r) {
-			continue
-		}
-		// if there are any jobs in flight in the run, keep going
-		if r.JobsInFlight() {
-			continue
-		}
-
-		p.shutdown()
-
-		break
-	}
-	slog.Info("ReturnChanWorker Quit")
-	wg.Done()
+func (p *Processor[AC, OC, JC]) runJob(job Job[JC]) {
+	p.stateStatusMap[job.State].Executing += 1
+	p.stateChan[job.State] <- job
 }
 
-func (p *Processor[AC, OC, JC]) updateStatusCounts(r *Run[OC, JC]) {
-	counts := r.StatusCounts()
+func (p *Processor[AC, OC, JC]) queueJob(job Job[JC]) {
+	p.stateStatusMap[job.State].Waiting += 1
+	p.stateWaitingJobsMap[job.State] = append(p.stateWaitingJobsMap[job.State], job)
+}
 
-	ret := []StatusCount{}
+func (p *Processor[AC, OC, JC]) completeJob(job Job[JC]) {
+	p.stateStatusMap[job.State].Completed += 1
+}
 
-	for _, state := range p.states {
-		if _, ok := counts[state.TriggerState]; !ok {
-			ret = append(ret, StatusCount{
-				State:     state.TriggerState,
-				Count:     0,
-				Executing: 0,
-				Terminal:  state.Terminal,
-			})
-			continue
+func (p *Processor[AC, OC, JC]) processJob(job Job[JC]) {
+	if p.isTerminal(job) {
+		p.completeJob(job)
+	} else {
+		if p.canRunJobForState(job.State) {
+			p.runJob(job)
+		} else {
+			p.queueJob(job)
 		}
-		c := counts[state.TriggerState]
-		c.Terminal = state.Terminal
-		ret = append(ret, c)
 	}
+}
+
+func (p *Processor[AC, OC, JC]) runNextWaitingJob(state string) {
+	// One less job is executing for the prior state
+	p.stateStatusMap[state].Executing -= 1
+
+	// There are no waiting jobs for the state, so we have nothing to queue
+	waitingJobCount := len(p.stateWaitingJobsMap[state])
+	if waitingJobCount == 0 {
+		return
+	}
+
+	job := p.stateWaitingJobsMap[state][waitingJobCount-1]
+	p.stateWaitingJobsMap[state] = p.stateWaitingJobsMap[state][0 : waitingJobCount-1]
+	p.stateStatusMap[job.State].Waiting -= 1
+
+	p.runJob(job)
+}
+
+func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg *sync.WaitGroup) {
+	defer func() {
+		p.shutdown()
+		wg.Add(-1)
+	}()
+
+	// Enqueue the jobs to start
+	for _, job := range r.Jobs {
+		p.processJob(job)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case completedJob := <-p.returnChan:
+			// If the prior state of the completed job was at capacity, we now have space for one more
+			p.runNextWaitingJob(completedJob.PriorState)
+
+			// Update the run with the new state
+			r.UpdateJob(completedJob.Job)
+			p.processJob(completedJob.Job)
+
+			// Start any of the new jobs that need kicking
+			for idx, kickRequest := range completedJob.KickRequests {
+				job := Job[JC]{
+					Id:          fmt.Sprintf("%s->%d", completedJob.Job.Id, idx),
+					C:           kickRequest.C,
+					State:       kickRequest.State,
+					StateErrors: map[string][]string{},
+				}
+				r.UpdateJob(job)
+				p.processJob(job)
+			}
+
+			if err := p.serializer.Serialize(*r); err != nil {
+				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
+			}
+
+			p.updateStatus()
+
+			if p.allJobsAreTerminal(r) && !p.hasExecutingJobs() {
+				return
+			}
+		}
+	}
+}
+
+func (p *Processor[AC, OC, JC]) canRunJobForState(state string) bool {
+	return p.stateStatusMap[state].Executing < p.stateMap[state].Concurrency
+}
+
+func (p *Processor[AC, OC, JC]) hasExecutingJobs() bool {
+	for _, value := range p.stateStatusMap {
+		if value.Executing > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (p *Processor[AC, OC, JC]) updateStatus() {
+	ret := make([]StatusCount, 0)
+	for _, name := range p.sortedStateNames {
+		ret = append(ret, *p.stateStatusMap[name])
+	}
+
 	p.statusListener.StatusUpdate(ret)
 }
 
+func (p *Processor[AC, OC, JC]) isTerminal(job Job[JC]) bool {
+	return p.stateMap[job.State].Terminal
+}
+
 func (p *Processor[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
-	c := r.StatusCounts()
-	for _, k := range p.states {
-		if k.Terminal {
-			continue
-		}
-		if c[k.TriggerState].Count > 0 {
+	for _, job := range r.Jobs {
+		if !p.isTerminal(job) {
 			return false
 		}
 	}
 	return true
-}
-
-func (p *Processor[AC, OC, JC]) enqueueAllJobs(r *Run[OC, JC]) {
-	slog.Info("Enqueing Jobs", "jobCount", len(r.Jobs))
-	enqueued := 0
-	for _, state := range p.states {
-		enqueued += p.enqueueJobsForState(r, state) // mutates r.Jobs
-	}
-	slog.Info("All Queues Primed", "jobCount", len(r.Jobs), "enqueuedCount", enqueued)
-}
-
-func (p *Processor[AC, OC, JC]) enqueueJobsForState(r *Run[OC, JC], state State[AC, OC, JC]) int {
-	slog.Info("Enqueueing jobs for state", "state", state.TriggerState)
-	enqueued := 0
-	for {
-		j, ok := r.NextJobForState(state.TriggerState)
-		if !ok {
-			slog.Info("No more jobs for state", "state", state.TriggerState)
-			return enqueued
-		}
-		c := p.stateChan[state.TriggerState]
-		select {
-		case c <- j:
-			enqueued++
-			slog.Info("Enqueing Job", "state", j.State, "job", j.Id)
-			continue
-		default:
-			r.Return(j)
-			return enqueued
-		}
-	}
-	slog.Info("Enqueued jobs for state", "state", state.TriggerState, "enqueuedCount", enqueued)
-	return enqueued
 }
 
 func (p *Processor[AC, OC, JC]) shutdown() {
@@ -305,79 +314,64 @@ func (p *Processor[AC, OC, JC]) shutdown() {
 	close(p.returnChan)
 }
 
-func (p *Processor[AC, OC, JC]) kickJobs(rtn Return[JC], j Job[JC], r *Run[OC, JC]) {
-	if rtn.KickRequests == nil {
-		return
-	}
-	for _, k := range rtn.KickRequests {
-		// create a new job with the right state
-		newJob := Job[JC]{
-			Id:          fmt.Sprintf("%s->%d", j.Id, len(r.Jobs)),
-			C:           k.C,
-			State:       k.State,
-			StateErrors: map[string][]string{},
-		}
-
-		// validate it
-		_, ok := p.stateMap[newJob.State]
-		if !ok {
-			log.Fatal(p.invalidStateError(newJob.State))
-		}
-
-		// return it to the run, it'll get re-enqueued by the main return loop
-		r.Return(newJob)
-	}
-}
-
 type StateExec[AC any, OC any, JC any] struct {
-	State      State[AC, OC, JC]
-	i          int
-	wg         sync.WaitGroup
-	c          chan Job[JC]
-	Overall    OC
 	ctx        context.Context
-	returnChan chan Return[JC]
 	ac         AC
+	oc         OC
+	state      State[AC, OC, JC]
+	jobChan    <-chan Job[JC]
+	returnChan chan<- Return[JC]
+	i          int
+	wg         *sync.WaitGroup
 }
 
 func (s *StateExec[AC, OC, JC]) Run() {
-	slog.Info("Starting worker", "worker", s.i, "state", s.State.TriggerState)
-	for j := range s.c {
-		if s.State.RateLimit != nil {
-			s.State.RateLimit.Wait(s.ctx)
-			slog.Info("LimiterAllowed", "worker", s.i, "state", s.State.TriggerState, "job", j.Id)
-		}
-		// Execute the job
-		rtn := Return[JC]{}
-		slog.Info("Executing job", "job", j.Id, "state", s.State.TriggerState)
-		j.C, j.State, rtn.KickRequests, rtn.Error = s.State.Exec(s.ctx, s.ac, s.Overall, j.C)
-		slog.Info("Execution complete", "job", j.Id, "state", s.State.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
+	slog.Info("Starting worker", "worker", s.i, "state", s.state.TriggerState)
+	defer func() {
+		s.wg.Add(-1)
+		slog.Info("Stopped worker", "worker", s.i, "state", s.state.TriggerState)
+	}()
 
-		rtn.Job = j
-		//go func() {
-		slog.Info("Returning job", "job", j.Id, "newState", j.State)
-		s.returnChan <- rtn
-		slog.Info("Returned job", "job", j.Id, "newState", j.State)
-		//}()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case j, more := <-s.jobChan:
+			// The channel was closed
+			if !more {
+				return
+			}
+
+			if s.state.RateLimit != nil {
+				s.state.RateLimit.Wait(s.ctx)
+				slog.Info("LimiterAllowed", "worker", s.i, "state", s.state.TriggerState, "job", j.Id)
+			}
+			// Execute the job
+			rtn := Return[JC]{
+				PriorState: j.State,
+			}
+			slog.Info("Executing job", "job", j.Id, "state", s.state.TriggerState)
+			j.C, j.State, rtn.KickRequests, rtn.Error = s.state.Exec(s.ctx, s.ac, s.oc, j.C)
+			slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
+
+			rtn.Job = j
+			slog.Info("Returning job", "job", j.Id, "newState", j.State)
+			s.returnChan <- rtn
+			slog.Info("Returned job", "job", j.Id, "newState", j.State)
+		}
 	}
-	s.wg.Done()
-	slog.Info("Stopped worker", "worker", s.i, "state", s.State.TriggerState)
 }
 
-func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, r *Run[OC, JC], s State[AC, OC, JC], i int, wg sync.WaitGroup) func() {
-	wg.Add(1)
+func (p *Processor[AC, OC, JC]) execFunc(ctx context.Context, state State[AC, OC, JC], overallContext OC, i int, wg *sync.WaitGroup) func() {
 	e := &StateExec[AC, OC, JC]{
-		State:      s,
+		ctx:        ctx,
+		ac:         p.appContext,
+		oc:         overallContext,
+		state:      state,
+		jobChan:    p.stateChan[state.TriggerState],
+		returnChan: p.returnChan,
 		i:          i,
 		wg:         wg,
-		c:          p.stateChan[s.TriggerState],
-		ctx:        ctx,
-		returnChan: p.returnChan,
-		ac:         p.appContext,
 	}
 	return e.Run
-}
-
-func (p *Processor[AC, OC, JC]) invalidStateError(s string) error {
-	return fmt.Errorf("State [%s] has no executor, valid state names: %s", s, strings.Join(p.stateNames, ", "))
 }
