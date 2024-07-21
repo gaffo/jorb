@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"log"
 	"log/slog"
 	"math/rand"
@@ -79,8 +78,5 @@ func (f *fileListener) StatusUpdate(status []jorb.StatusCount) {
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(status)
 
-	file, _ := os.Create(f.fileName)
-	defer file.Close()
-
-	_, _ = io.Copy(file, buf)
+	_ = os.WriteFile(f.fileName, buf.Bytes(), 0644)
 }
