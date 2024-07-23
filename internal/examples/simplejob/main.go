@@ -60,7 +60,11 @@ func main() {
 
 	serial := jorb.NewJsonSerializer[oc, jc]("example.state")
 	listener := &fileListener{fileName: "example.status"}
-	p := jorb.NewProcessor[ac, oc, jc](a, states, serial, listener)
+	p, err := jorb.NewProcessor[ac, oc, jc](a, states, serial, listener)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if err := p.Exec(context.Background(), r); err != nil {
 		log.Fatal(err)
 	}

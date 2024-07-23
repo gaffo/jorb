@@ -12,12 +12,6 @@ import (
 
 func TestJsonSerializer_SaveLoad(t *testing.T) {
 	t.Parallel()
-	// Create a temporary directory for testing
-	tempDir, err := os.MkdirTemp("", "test")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
 
 	// Create a test run
 	run := NewRun[MyOverallContext, MyJobContext]("test", MyOverallContext{Name: "overall"})
@@ -28,11 +22,11 @@ func TestJsonSerializer_SaveLoad(t *testing.T) {
 	}
 
 	// Create a JsonSerializer with a temporary file
-	tempFile := filepath.Join(tempDir, "test.json")
+	tempFile := filepath.Join(t.TempDir(), "test.json")
 	serializer := &JsonSerializer[MyOverallContext, MyJobContext]{File: tempFile}
 
 	// Serialize the run
-	err = serializer.Serialize(*run)
+	err := serializer.Serialize(*run)
 	require.NoError(t, err)
 
 	require.FileExists(t, tempFile)
@@ -56,7 +50,7 @@ func Test_SerializeWithError(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	r := NewRun[MyOverallContext, MyJobContext]("test", MyOverallContext{Name: "overall"})
-	r.Return(Job[MyJobContext]{
+	r.UpdateJob(Job[MyJobContext]{
 		C: MyJobContext{Count: 0, Name: "job-0"},
 		StateErrors: map[string][]string{
 			"key": []string{

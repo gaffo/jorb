@@ -58,11 +58,11 @@ type StatusCount struct {
 type state struct {
 }
 
-type stateThing[AC any, OC any, JC any] struct {
+type stateStorage[AC any, OC any, JC any] struct {
 	// This is fine for package-internal use cases to directly iterate over
 	states []State[AC, OC, JC]
 
-	// These shouldn't be used outside stateThing's methods
+	// These shouldn't be used outside stateStorage's methods
 	stateMap            map[string]State[AC, OC, JC]
 	stateStatusMap      map[string]*StatusCount
 	stateWaitingJobsMap map[string][]Job[JC]
@@ -70,8 +70,8 @@ type stateThing[AC any, OC any, JC any] struct {
 	sortedStateNames    []string
 }
 
-func newStateThingFromStates[AC any, OC any, JC any](states []State[AC, OC, JC]) stateThing[AC, OC, JC] {
-	st := stateThing[AC, OC, JC]{
+func newStateStorageFromStates[AC any, OC any, JC any](states []State[AC, OC, JC]) stateStorage[AC, OC, JC] {
+	st := stateStorage[AC, OC, JC]{
 		states:              states,
 		stateMap:            map[string]State[AC, OC, JC]{},
 		stateStatusMap:      map[string]*StatusCount{},
@@ -98,11 +98,15 @@ func newStateThingFromStates[AC any, OC any, JC any](states []State[AC, OC, JC])
 	return st
 }
 
-func (s stateThing[AC, OC, JC]) getJobChannelForState(stateName string) chan Job[JC] {
+func (s stateStorage[AC, OC, JC]) getJobChannelForState(stateName string) chan Job[JC] {
 	return s.stateChan[stateName]
 }
 
-func (s stateThing[AC, OC, JC]) validate() error {
+func (s stateStorage[AC, OC, JC]) closeJobChannelForState(stateName string) {
+	close(s.stateChan[stateName])
+}
+
+func (s stateStorage[AC, OC, JC]) validate() error {
 	for _, state := range s.states {
 		if state.Terminal {
 			if state.Concurrency < 0 {
@@ -121,37 +125,39 @@ func (s stateThing[AC, OC, JC]) validate() error {
 	return nil
 }
 
-func (s stateThing[AC, OC, JC]) runJob(job Job[JC]) {
+func (s stateStorage[AC, OC, JC]) runJob(job Job[JC]) {
 	s.stateStatusMap[job.State].Executing += 1
 	s.stateChan[job.State] <- job
 }
 
-func (s stateThing[AC, OC, JC]) queueJob(job Job[JC]) {
+func (s stateStorage[AC, OC, JC]) queueJob(job Job[JC]) {
 	s.stateStatusMap[job.State].Waiting += 1
 	s.stateWaitingJobsMap[job.State] = append(s.stateWaitingJobsMap[job.State], job)
 }
 
-func (s stateThing[AC, OC, JC]) completeJob(job Job[JC]) {
+func (s stateStorage[AC, OC, JC]) completeJob(job Job[JC]) {
 	s.stateStatusMap[job.State].Completed += 1
 }
 
-func (s stateThing[AC, OC, JC]) processJob(job Job[JC]) {
+func (s stateStorage[AC, OC, JC]) processJob(job Job[JC]) {
 	if s.isTerminal(job) {
 		s.completeJob(job)
-	} else {
-		if s.canRunJobForState(job.State) {
-			s.runJob(job)
-		} else {
-			s.queueJob(job)
-		}
+		return
 	}
+
+	if s.canRunJobForState(job.State) {
+		s.runJob(job)
+		return
+	}
+
+	s.queueJob(job)
 }
 
-func (s stateThing[AC, OC, JC]) isTerminal(job Job[JC]) bool {
+func (s stateStorage[AC, OC, JC]) isTerminal(job Job[JC]) bool {
 	return s.stateMap[job.State].Terminal
 }
 
-func (s stateThing[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
+func (s stateStorage[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
 	for _, job := range r.Jobs {
 		if !s.isTerminal(job) {
 			return false
@@ -160,7 +166,7 @@ func (s stateThing[AC, OC, JC]) allJobsAreTerminal(r *Run[OC, JC]) bool {
 	return true
 }
 
-func (s stateThing[AC, OC, JC]) runNextWaitingJob(state string) {
+func (s stateStorage[AC, OC, JC]) runNextWaitingJob(state string) {
 	// One less job is executing for the prior state
 	s.stateStatusMap[state].Executing -= 1
 
@@ -177,11 +183,11 @@ func (s stateThing[AC, OC, JC]) runNextWaitingJob(state string) {
 	s.runJob(job)
 }
 
-func (s stateThing[AC, OC, JC]) canRunJobForState(state string) bool {
+func (s stateStorage[AC, OC, JC]) canRunJobForState(state string) bool {
 	return s.stateStatusMap[state].Executing < s.stateMap[state].Concurrency
 }
 
-func (s stateThing[AC, OC, JC]) hasExecutingJobs() bool {
+func (s stateStorage[AC, OC, JC]) hasExecutingJobs() bool {
 	for _, value := range s.stateStatusMap {
 		if value.Executing > 0 {
 			return true
@@ -191,7 +197,7 @@ func (s stateThing[AC, OC, JC]) hasExecutingJobs() bool {
 	return false
 }
 
-func (s stateThing[AC, OC, JC]) getStatusCounts() []StatusCount {
+func (s stateStorage[AC, OC, JC]) getStatusCounts() []StatusCount {
 	ret := make([]StatusCount, 0)
 	for _, name := range s.sortedStateNames {
 		ret = append(ret, *s.stateStatusMap[name])
@@ -205,7 +211,7 @@ func (s stateThing[AC, OC, JC]) getStatusCounts() []StatusCount {
 type Processor[AC any, OC any, JC any] struct {
 	appContext     AC
 	serializer     Serializer[OC, JC]
-	stateThing     stateThing[AC, OC, JC]
+	stateThing     stateStorage[AC, OC, JC]
 	statusListener StatusListener
 	returnChan     chan Return[JC]
 	wg             sync.WaitGroup
@@ -220,13 +226,19 @@ type Return[JC any] struct {
 	Error        error
 }
 
-func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) *Processor[AC, OC, JC] {
-	return &Processor[AC, OC, JC]{
+func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) (*Processor[AC, OC, JC], error) {
+	p := &Processor[AC, OC, JC]{
 		appContext:     ac,
-		stateThing:     newStateThingFromStates(states),
+		stateThing:     newStateStorageFromStates(states),
 		serializer:     serializer,
 		statusListener: statusListener,
 	}
+
+	if err := p.stateThing.validate(); err != nil {
+		return nil, err
+	}
+
+	return p, nil
 }
 
 func (p *Processor[AC, OC, JC]) init() {
@@ -243,10 +255,6 @@ func (p *Processor[AC, OC, JC]) init() {
 
 // Exec this big work function, this does all the crunching
 func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error {
-	if err := p.stateThing.validate(); err != nil {
-		return err
-	}
-
 	p.init()
 
 	if p.stateThing.allJobsAreTerminal(r) {
@@ -283,6 +291,9 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 	for _, job := range r.Jobs {
 		p.stateThing.processJob(job)
 	}
+
+	// Send the initial status update with the state of all the jobs
+	p.updateStatus()
 
 	for {
 		select {
@@ -328,7 +339,7 @@ func (p *Processor[AC, OC, JC]) updateStatus() {
 func (p *Processor[AC, OC, JC]) shutdown() {
 	// close all of the channels
 	for _, state := range p.stateThing.states {
-		close(p.stateThing.getJobChannelForState(state.TriggerState))
+		p.stateThing.closeJobChannelForState(state.TriggerState)
 	}
 	// close ourselves down
 	close(p.returnChan)
