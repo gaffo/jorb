@@ -105,6 +105,10 @@ func (r *Run[OC, JC]) Equal(r2 *Run[OC, JC]) bool {
 			return false
 		}
 
+		if rValue.LastUpdate == nil && r2Value.LastUpdate == nil {
+			continue
+		}
+
 		if (rValue.LastUpdate == nil && r2Value.LastUpdate != nil) || (rValue.LastUpdate != nil && r2Value.LastUpdate == nil) {
 			return false
 		}
@@ -115,7 +119,7 @@ func (r *Run[OC, JC]) Equal(r2 *Run[OC, JC]) bool {
 				return false
 			}
 		} else {
-			if timeDiff > -time.Millisecond {
+			if timeDiff < -time.Millisecond {
 				return false
 			}
 		}

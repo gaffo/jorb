@@ -35,9 +35,7 @@ func TestJsonSerializer_SaveLoad(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check that the run is the same
-	assert.Equal(t, run.Overall, actualRun.Overall)
-	assert.Equal(t, run.Name, actualRun.Name)
-	assert.Equal(t, run.Jobs, actualRun.Jobs)
+	assert.True(t, run.Equal(actualRun))
 }
 
 func Test_SerializeWithError(t *testing.T) {
@@ -78,7 +76,5 @@ func Test_SerializeWithError(t *testing.T) {
 		j.LastUpdate = nil
 		actualRun.Jobs[k] = j
 	}
-	assert.Equal(t, r.Overall, actualRun.Overall)
-	assert.Equal(t, r.Name, actualRun.Name)
-	assert.Equal(t, r.Jobs, actualRun.Jobs)
+	assert.True(t, r.Equal(actualRun))
 }
