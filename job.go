@@ -17,7 +17,7 @@ func (j Job[JC]) UpdateLastEvent() Job[JC] {
 	// https://pkg.go.dev/time#hdr-Monotonic_Clocks
 	// The monotonic clock information will not be marshalled, and thus cause tests which Marshal / Unmarshal job state
 	// and expect the results to be the same to fail.
-	t := time.Now().Truncate(0)
+	t := time.Now().UTC().Truncate(time.Millisecond)
 	// Set the LastUpdate field to the current time
 	j.LastUpdate = &t
 	return j
