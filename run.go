@@ -3,7 +3,9 @@ package jorb
 import (
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
+	"time"
 )
 
 // Run is basically the overall state of a given run (batch) in the processing framework
@@ -70,4 +72,54 @@ func (r *Run[OC, JC]) AddJobWithState(jc JC, state string) {
 // Add a job to the pool, this shouldn't be called once it's running
 func (r *Run[OC, JC]) AddJob(jc JC) {
 	r.AddJobWithState(jc, TRIGGER_STATE_NEW)
+}
+
+func (r *Run[OC, JC]) Equal(r2 *Run[OC, JC]) bool {
+	if r.Name != r2.Name {
+		return false
+	}
+
+	if len(r.Jobs) != len(r2.Jobs) {
+		return false
+	}
+
+	for rKey, rValue := range r.Jobs {
+		r2Value, ok := r2.Jobs[rKey]
+		if !ok {
+			return false
+		}
+
+		if rValue.Id != r2Value.Id {
+			return false
+		}
+
+		if !reflect.DeepEqual(rValue.C, r2Value.C) {
+			return false
+		}
+
+		if rValue.State != r2Value.State {
+			return false
+		}
+
+		if !reflect.DeepEqual(rValue.StateErrors, r2Value.StateErrors) {
+			return false
+		}
+
+		if (rValue.LastUpdate == nil && r2Value.LastUpdate != nil) || (rValue.LastUpdate != nil && r2Value.LastUpdate == nil) {
+			return false
+		}
+
+		timeDiff := rValue.LastUpdate.Sub(*r2Value.LastUpdate)
+		if timeDiff > 0 {
+			if timeDiff > time.Millisecond {
+				return false
+			}
+		} else {
+			if timeDiff > -time.Millisecond {
+				return false
+			}
+		}
+	}
+
+	return true
 }

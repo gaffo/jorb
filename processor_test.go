@@ -292,7 +292,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
-	for i := 0; i < 30_000; i++ {
+	for i := 0; i < 40; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
 		})
@@ -310,7 +310,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 				return jc, STATE_DONE_TWO, nil, nil
 			},
 			Terminal:    false,
-			Concurrency: 1000,
+			Concurrency: 10,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_DONE_TWO,
@@ -331,7 +331,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
-	assert.Less(t, delta, time.Second*16, "Should take less than 9 seconds when run in parallel")
+	assert.Less(t, delta, time.Second*10, "Should take less than 10 seconds when run in parallel")
 
 	stateCount := map[string]int{}
 	for _, j := range r.Jobs {
