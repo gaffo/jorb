@@ -13,7 +13,11 @@ type Job[JC any] struct {
 
 // UpdateLastEvent updates the LastUpdate field of the Job struct to the current time.
 func (j Job[JC]) UpdateLastEvent() Job[JC] {
-	t := time.Now()
+	// Removes the monotonic clock portion of the timestamp which is only useful for measuring time
+	// https://pkg.go.dev/time#hdr-Monotonic_Clocks
+	// The monotonic clock information will not be marshalled, and thus cause tests which Marshal / Unmarshal job state
+	// and expect the results to be the same to fail.
+	t := time.Now().Truncate(time.Millisecond)
 	// Set the LastUpdate field to the current time
 	j.LastUpdate = &t
 	return j

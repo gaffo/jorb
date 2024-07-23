@@ -3,21 +3,19 @@ package jorb
 import (
 	"fmt"
 	"log/slog"
-	"sort"
+	"reflect"
 	"sync"
+	"time"
 )
 
 // Run is basically the overall state of a given run (batch) in the processing framework
 // it's meant to be re-entrant, eg if you kill the processor and you have a serializaer, you can
 // restart using it at any time
 type Run[OC any, JC any] struct {
-	Name                 string               // Name of the run
-	Jobs                 map[string]Job[JC]   // Map of jobs, where keys are job ids and values are Job states
-	Overall              OC                   // Overall overall state that is usful to all jobs, basically context for the overall batch
-	m                    sync.Mutex           // Mutex used for indexing operations
-	lockedJobsById       map[string]string    // If a job is locked and what state it was locked into
-	lockedJobsStateCount map[string]int       // How many jobs are locked for each state (for status)
-	stateCount           map[string][]Job[JC] // Job Queues for Speed
+	Name    string             // Name of the run
+	Jobs    map[string]Job[JC] // Map of jobs, where keys are job ids and values are Job states
+	Overall OC                 // Overall overall state that is usful to all jobs, basically context for the overall batch
+	m       sync.Mutex         // Mutex used for indexing operations
 }
 
 // NewRun creates a new Run instance with the given name and overall context
@@ -38,35 +36,20 @@ func NewRun[OC any, JC any](name string, oc OC) *Run[OC, JC] {
 func (r *Run[OC, JC]) Init() {
 	r.m.Lock()
 	defer r.m.Unlock()
-	r.lockedJobsById = map[string]string{}
-	r.lockedJobsStateCount = map[string]int{}
-	r.stateCount = map[string][]Job[JC]{}
 
-	// initialize the state counts
 	for _, j := range r.Jobs {
-		s := j.State
-		if _, ok := r.stateCount[s]; !ok {
-			r.stateCount[s] = []Job[JC]{}
-		}
 		// if it doesn't have a last event, give it one
 		if j.LastUpdate == nil {
 			j.UpdateLastEvent()
 		}
-		r.stateCount[s] = append(r.stateCount[s], j)
 	}
-	// now that they're all added we need to sort them
-	for state, list := range r.stateCount {
-		sort.Slice(list, func(i, j int) bool {
-			if list[i].LastUpdate == nil {
-				return false
-			}
-			if list[j].LastUpdate == nil {
-				return true
-			}
-			return list[i].LastUpdate.Before(*list[j].LastUpdate)
-		})
-		r.stateCount[state] = list
-	}
+}
+
+func (r *Run[OC, JC]) UpdateJob(j Job[JC]) {
+	r.m.Lock()
+	defer r.m.Unlock()
+
+	r.Jobs[j.Id] = j.UpdateLastEvent()
 }
 
 func (r *Run[OC, JC]) AddJobWithState(jc JC, state string) {
@@ -81,12 +64,9 @@ func (r *Run[OC, JC]) AddJobWithState(jc JC, state string) {
 		State:       state,
 		StateErrors: map[string][]string{},
 	}
-	j.UpdateLastEvent()
-	// Pop it onto the end of the appropriate queue
-	r.stateCount[j.State] = append(r.stateCount[j.State], j)
 
 	slog.Info("AddJob", "run", r.Name, "job", j, "totalJobs", len(r.Jobs))
-	r.Jobs[id] = j
+	r.Jobs[id] = j.UpdateLastEvent()
 }
 
 // Add a job to the pool, this shouldn't be called once it's running
@@ -94,67 +74,56 @@ func (r *Run[OC, JC]) AddJob(jc JC) {
 	r.AddJobWithState(jc, TRIGGER_STATE_NEW)
 }
 
-func (r *Run[OC, JC]) NextJobForState(state string) (Job[JC], bool) {
-	r.m.Lock()
-	defer r.m.Unlock()
-
-	if len(r.stateCount[state]) == 0 {
-		return Job[JC]{}, false
+func (r *Run[OC, JC]) Equal(r2 *Run[OC, JC]) bool {
+	if r.Name != r2.Name {
+		return false
 	}
 
-	// pop the item off the front of the queue
-	minJob := r.stateCount[state][0]
-	r.stateCount[state] = r.stateCount[state][1:]
-
-	// lock it
-	r.lockedJobsById[minJob.Id] = minJob.State
-	r.lockedJobsStateCount[minJob.State]++
-
-	// update it's last event
-	r.Jobs[minJob.Id] = minJob.UpdateLastEvent()
-
-	// return it
-	return r.Jobs[minJob.Id], true
-}
-
-func (r *Run[OC, JC]) Return(j Job[JC]) {
-	r.m.Lock()
-	defer r.m.Unlock()
-
-	r.Jobs[j.Id] = j.UpdateLastEvent()
-
-	// decremnt the previous state
-	prevState := r.lockedJobsById[j.Id]
-	r.lockedJobsStateCount[prevState]--
-
-	// unlock it
-	delete(r.lockedJobsById, j.Id)
-
-	// push it to the back of the new state
-	r.stateCount[j.State] = append(r.stateCount[j.State], j)
-}
-
-func (r *Run[OC, JC]) JobsInFlight() bool {
-	r.m.Lock()
-	defer r.m.Unlock()
-	// if any of the jobs are in flight, return true
-
-	if len(r.lockedJobsById) > 0 {
-		return true
+	if len(r.Jobs) != len(r2.Jobs) {
+		return false
 	}
-	return false
-}
 
-func (r *Run[OC, JC]) StatusCounts() map[string]StatusCount {
-	ret := map[string]StatusCount{}
+	for rKey, rValue := range r.Jobs {
+		r2Value, ok := r2.Jobs[rKey]
+		if !ok {
+			return false
+		}
 
-	for k, v := range r.stateCount {
-		ret[k] = StatusCount{
-			State:     k,
-			Count:     len(v) + r.lockedJobsStateCount[k],
-			Executing: r.lockedJobsStateCount[k],
+		if rValue.Id != r2Value.Id {
+			return false
+		}
+
+		if !reflect.DeepEqual(rValue.C, r2Value.C) {
+			return false
+		}
+
+		if rValue.State != r2Value.State {
+			return false
+		}
+
+		if !reflect.DeepEqual(rValue.StateErrors, r2Value.StateErrors) {
+			return false
+		}
+
+		if rValue.LastUpdate == nil && r2Value.LastUpdate == nil {
+			continue
+		}
+
+		if (rValue.LastUpdate == nil && r2Value.LastUpdate != nil) || (rValue.LastUpdate != nil && r2Value.LastUpdate == nil) {
+			return false
+		}
+
+		timeDiff := rValue.LastUpdate.Sub(*r2Value.LastUpdate)
+		if timeDiff > 0 {
+			if timeDiff > time.Millisecond {
+				return false
+			}
+		} else {
+			if timeDiff < -time.Millisecond {
+				return false
+			}
 		}
 	}
 
-	return ret
+	return true
 }

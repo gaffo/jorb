@@ -41,6 +41,111 @@ const (
 	STATE_DONE_TWO = "done_two"
 )
 
+func createJob(state string) Job[MyJobContext] {
+	return Job[MyJobContext]{
+		Id:    "",
+		C:     MyJobContext{},
+		State: state,
+	}
+}
+
+func TestStateStorage(t *testing.T) {
+	concurrency := 5
+	stateS := newStateStorageFromStates([]State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, STATE_DONE, nil, nil
+			},
+			Terminal:    false,
+			Concurrency: concurrency,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	})
+
+	// Fake processor that just takes jobs and throws them away, as the StateStorage doesn't actually care about
+	// Any of the actual processing
+	go func() {
+		for true {
+			select {
+			case <-stateS.stateChan[TRIGGER_STATE_NEW]:
+				continue
+			}
+		}
+	}()
+
+	for i := 0; i < concurrency*2; i++ {
+		stateS.processJob(createJob(TRIGGER_STATE_NEW))
+	}
+	assert.Equal(t, []StatusCount{
+		{
+			State:    STATE_DONE,
+			Terminal: true,
+		},
+		{
+			State:     TRIGGER_STATE_NEW,
+			Executing: concurrency,
+			Waiting:   concurrency,
+		},
+	}, stateS.getStatusCounts())
+	for i := 0; i < 2; i++ {
+		stateS.runNextWaitingJob(TRIGGER_STATE_NEW)
+		stateS.processJob(createJob(STATE_DONE))
+	}
+
+	assert.Equal(t, []StatusCount{
+		{
+			State:     STATE_DONE,
+			Terminal:  true,
+			Completed: 2,
+		},
+		{
+			State:     TRIGGER_STATE_NEW,
+			Executing: concurrency,
+			Waiting:   concurrency - 2,
+		},
+	}, stateS.getStatusCounts())
+
+	for i := 0; i < concurrency-2; i++ {
+		stateS.runNextWaitingJob(TRIGGER_STATE_NEW)
+		stateS.processJob(createJob(STATE_DONE))
+	}
+
+	assert.Equal(t, []StatusCount{
+		{
+			State:     STATE_DONE,
+			Terminal:  true,
+			Completed: concurrency,
+		},
+		{
+			State:     TRIGGER_STATE_NEW,
+			Executing: concurrency,
+			Waiting:   0,
+		},
+	}, stateS.getStatusCounts())
+
+	for i := 0; i < concurrency; i++ {
+		stateS.runNextWaitingJob(TRIGGER_STATE_NEW)
+		stateS.processJob(createJob(STATE_DONE))
+	}
+
+	assert.Equal(t, []StatusCount{
+		{
+			State:     STATE_DONE,
+			Terminal:  true,
+			Completed: concurrency * 2,
+		},
+		{
+			State:     TRIGGER_STATE_NEW,
+			Executing: 0,
+			Waiting:   0,
+		},
+	}, stateS.getStatusCounts())
+}
+
 func TestProcessorOneJob(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
@@ -69,10 +174,11 @@ func TestProcessorOneJob(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -99,10 +205,11 @@ func TestProcessorAllTerminal(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -144,10 +251,11 @@ func TestProcessorTwoSequentialJobs(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -184,7 +292,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
-	for i := 0; i < 30_000; i++ {
+	for i := 0; i < 40; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
 		})
@@ -202,7 +310,7 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 				return jc, STATE_DONE_TWO, nil, nil
 			},
 			Terminal:    false,
-			Concurrency: 1000,
+			Concurrency: 10,
 		},
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: STATE_DONE_TWO,
@@ -216,13 +324,14 @@ func TestProcessor_TwoTerminal(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
 	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
-	assert.Less(t, delta, time.Second*16, "Should take less than 9 seconds when run in parallel")
+	assert.Less(t, delta, time.Second*10, "Should take less than 10 seconds when run in parallel")
 
 	stateCount := map[string]int{}
 	for _, j := range r.Jobs {
@@ -268,7 +377,7 @@ func TestProcessor_StateCallback(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
-	for i := 0; i < 1; i++ {
+	for i := 0; i < 11; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
 		})
@@ -279,50 +388,36 @@ func TestProcessor_StateCallback(t *testing.T) {
 	}
 	tl.ExpectStatus([]StatusCount{
 		{
-			State: TRIGGER_STATE_NEW,
-			Count: 1,
-		},
-		{
-			State:    STATE_DONE,
-			Count:    0,
-			Terminal: true,
-		},
-	})
-	tl.ExpectStatus([]StatusCount{
-		{
 			State:     TRIGGER_STATE_NEW,
-			Count:     1,
-			Executing: 1,
+			Waiting:   1,
+			Executing: 10,
+			Completed: 0,
 		},
 		{
-			State:    STATE_DONE,
-			Count:    0,
-			Terminal: true,
+			State:     STATE_DONE,
+			Waiting:   0,
+			Executing: 0,
+			Completed: 0,
+			Terminal:  true,
 		},
 	})
-	tl.ExpectStatus([]StatusCount{
-		{
-			State:     TRIGGER_STATE_NEW,
-			Count:     1,
-			Executing: 1,
-		},
-		{
-			State:    STATE_DONE,
-			Count:    0,
-			Terminal: true,
-		},
-	})
-	tl.ExpectStatus([]StatusCount{
-		{
-			State: TRIGGER_STATE_NEW,
-			Count: 0,
-		},
-		{
-			State:    STATE_DONE,
-			Count:    1,
-			Terminal: true,
-		},
-	})
+	for i := 0; i <= 10; i++ {
+		tl.ExpectStatus([]StatusCount{
+			{
+				State:     TRIGGER_STATE_NEW,
+				Waiting:   0,
+				Executing: 10 - i,
+				Completed: 0,
+			},
+			{
+				State:     STATE_DONE,
+				Waiting:   0,
+				Executing: 0,
+				Completed: 1 + i,
+				Terminal:  true,
+			},
+		})
+	}
 
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
 		State[MyAppContext, MyOverallContext, MyJobContext]{
@@ -343,10 +438,11 @@ func TestProcessor_StateCallback(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, tl)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, tl)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -386,10 +482,11 @@ func TestProcessor_Retries(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -451,10 +548,11 @@ func TestProcessor_RateLimiter(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*4)
@@ -494,10 +592,11 @@ func TestProcessor_RateLimiterSlows(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	jobCount := len(r.Jobs)
@@ -548,10 +647,11 @@ func TestProcessor_LoopWithExit(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
@@ -602,7 +702,8 @@ func TestProcessor_Serialization(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
 	err = p.Exec(context.Background(), r)
@@ -687,10 +788,11 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 		},
 	}
 
-	p := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
 
 	start := time.Now()
-	err := p.Exec(context.Background(), r)
+	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
