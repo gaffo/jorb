@@ -229,7 +229,7 @@ type Return[JC any] struct {
 func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) (*Processor[AC, OC, JC], error) {
 	p := &Processor[AC, OC, JC]{
 		appContext:     ac,
-		stateThing:     newStateStorageFromStates(states),
+		stateStorage:   newStateStorageFromStates(states),
 		serializer:     serializer,
 		statusListener: statusListener,
 	}
