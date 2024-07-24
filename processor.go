@@ -258,6 +258,11 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	p.init()
 
 	if p.stateThing.allJobsAreTerminal(r) {
+		// Send one status update so that if there are listeners they can render the correct values
+		for _, job := range r.Jobs {
+			p.stateThing.completeJob(job)
+		}
+		p.statusListener.StatusUpdate(p.stateThing.getStatusCounts())
 		slog.Info("AllJobsTerminal")
 		return nil
 	}

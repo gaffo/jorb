@@ -198,14 +198,41 @@ func TestProcessorAllTerminal(t *testing.T) {
 			Count: 0,
 		})
 	}
+	for i := 0; i < 5; i++ {
+		r.AddJobWithState(MyJobContext{
+			Count: 0,
+		}, STATE_DONE_TWO)
+	}
 	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
-		State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: STATE_DONE_TWO,
+			Terminal:     true,
+		},
+		{
 			TriggerState: TRIGGER_STATE_NEW,
 			Terminal:     true,
 		},
 	}
 
-	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	testSl := testStatusListener{
+		t: t,
+		expectedStatuses: [][]StatusCount{
+			{
+				StatusCount{
+					State:     STATE_DONE_TWO,
+					Completed: 5,
+					Terminal:  true,
+				},
+				StatusCount{
+					State:     TRIGGER_STATE_NEW,
+					Completed: 10,
+					Terminal:  true,
+				},
+			},
+		},
+	}
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, &testSl)
 	assert.NoError(t, err)
 
 	start := time.Now()
@@ -213,6 +240,8 @@ func TestProcessorAllTerminal(t *testing.T) {
 	delta := time.Since(start)
 	require.NoError(t, err)
 	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+	// Should have gotten an update
+	assert.Equal(t, 1, testSl.cur)
 }
 
 func TestProcessorTwoSequentialJobs(t *testing.T) {
