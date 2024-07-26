@@ -55,9 +55,6 @@ type StatusCount struct {
 	Terminal  bool
 }
 
-type state struct {
-}
-
 type stateStorage[AC any, OC any, JC any] struct {
 	// This is fine for package-internal use cases to directly iterate over
 	states []State[AC, OC, JC]
