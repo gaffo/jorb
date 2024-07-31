@@ -2,6 +2,7 @@ package jorb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -716,10 +717,14 @@ func TestProcessor_Serialization(t *testing.T) {
 		State[MyAppContext, MyOverallContext, MyJobContext]{
 			TriggerState: TRIGGER_STATE_NEW,
 			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				if jc.Count == 1 {
+					return jc, STATE_DONE, nil, errors.New("errored again")
+				}
+
 				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
-				return jc, STATE_DONE, nil, nil
+				return jc, TRIGGER_STATE_NEW, nil, errors.New("errored")
 			},
 			Terminal:    false,
 			Concurrency: 10,
@@ -738,10 +743,11 @@ func TestProcessor_Serialization(t *testing.T) {
 	err = p.Exec(context.Background(), r)
 	delta := time.Since(start)
 	require.NoError(t, err)
-	assert.Less(t, delta, time.Second*2, "Should take less than 2 seconds when run in parallel")
+	assert.Less(t, delta, time.Second*4, "Should take less than 4 seconds when run in parallel")
 
 	for _, j := range r.Jobs {
 		assert.Equal(t, 1, j.C.Count, "Job Count should be 1")
+		assert.Equal(t, map[string][]string{TRIGGER_STATE_NEW: {"errored", "errored again"}}, j.StateErrors)
 	}
 
 	// Now reload the job
