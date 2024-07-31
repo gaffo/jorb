@@ -223,7 +223,6 @@ type Return[JC any] struct {
 	PriorState   string
 	Job          Job[JC]
 	KickRequests []KickRequest[JC]
-	Error        error
 }
 
 func NewProcessor[AC any, OC any, JC any](ac AC, states []State[AC, OC, JC], serializer Serializer[OC, JC], statusListener StatusListener) (*Processor[AC, OC, JC], error) {
@@ -382,13 +381,20 @@ func (s *StateExec[AC, OC, JC]) Run() {
 				s.state.RateLimit.Wait(s.ctx)
 				slog.Info("LimiterAllowed", "worker", s.i, "state", s.state.TriggerState, "job", j.Id)
 			}
+			priorState := j.State
 			// Execute the job
 			rtn := Return[JC]{
-				PriorState: j.State,
+				PriorState: priorState,
 			}
 			slog.Info("Executing job", "job", j.Id, "state", s.state.TriggerState)
-			j.C, j.State, rtn.KickRequests, rtn.Error = s.state.Exec(s.ctx, s.ac, s.oc, j.C)
-			slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", rtn.Error, "kickRequests", len(rtn.KickRequests))
+			var err error
+			j.C, j.State, rtn.KickRequests, err = s.state.Exec(s.ctx, s.ac, s.oc, j.C)
+			if err != nil {
+				j.StateErrors[priorState] = append(j.StateErrors[priorState], err.Error())
+				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", err, "kickRequests", len(rtn.KickRequests))
+			} else {
+				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "kickRequests", len(rtn.KickRequests))
+			}
 
 			rtn.Job = j
 			slog.Info("Returning job", "job", j.Id, "newState", j.State)
