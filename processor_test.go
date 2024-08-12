@@ -482,6 +482,66 @@ func TestProcessor_StateCallback(t *testing.T) {
 	}
 }
 
+func TestNoStatusCounts(t *testing.T) {
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r.AddJob(MyJobContext{
+		Count: 0,
+	})
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				jc.Count++
+				if jc.Count < 10 {
+					return jc, TRIGGER_STATE_NEW, nil, nil
+				}
+				return jc, STATE_DONE, nil, nil
+			},
+			Concurrency: 1,
+		},
+		State[MyAppContext, MyOverallContext, MyJobContext]{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	testSl := testStatusListener{
+		t: t,
+		expectedStatuses: [][]StatusCount{
+			{
+				StatusCount{
+					State:     STATE_DONE,
+					Completed: 0,
+					Terminal:  true,
+				},
+				StatusCount{
+					State:     TRIGGER_STATE_NEW,
+					Executing: 1,
+				},
+			},
+			{
+				StatusCount{
+					State:     STATE_DONE,
+					Completed: 1,
+					Terminal:  true,
+				},
+				StatusCount{
+					State: TRIGGER_STATE_NEW,
+				},
+			},
+		},
+	}
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, &testSl)
+	assert.NoError(t, err)
+
+	err = p.Exec(context.Background(), r)
+	time.Sleep(1 * time.Second)
+	assert.Equal(t, 2, testSl.cur)
+}
+
 func TestProcessor_Retries(t *testing.T) {
 	t.Parallel()
 	oc := MyOverallContext{}
