@@ -327,7 +327,11 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
 			}
 
-			p.updateStatus()
+			// If we move a job back to the same state and there are no kick requests, no need to see a status
+			// update as the totals will be the same
+			if completedJob.PriorState != completedJob.Job.State || len(completedJob.KickRequests) > 0 {
+				p.updateStatus()
+			}
 
 			if p.stateStorage.allJobsAreTerminal(r) && !p.stateStorage.hasExecutingJobs() {
 				return
