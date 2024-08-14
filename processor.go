@@ -132,7 +132,12 @@ func (s stateStorage[AC, OC, JC]) runJob(job Job[JC]) {
 
 func (s stateStorage[AC, OC, JC]) queueJob(job Job[JC]) {
 	s.stateStatusMap[job.State].Waiting += 1
-	s.stateWaitingJobsMap[job.State] = append(s.stateWaitingJobsMap[job.State], job)
+	// Since we pull queued jobs from the end of the slice, we should put new jobs at the front
+	// to ensure fairness (jobs that come later only get processed after already waiting jobs)
+	// If this was in the hot loop (happening thousands of times per second), the memory re-alloc here wouldn't be great
+	// However, typically work involved in state transitions is 4+ orders of magnitude lower than the actual work
+	// being done, so the simplicity is preferred compared to some sort of more elegant resizing ring buffer
+	s.stateWaitingJobsMap[job.State] = append([]Job[JC]{job}, s.stateWaitingJobsMap[job.State]...)
 }
 
 func (s stateStorage[AC, OC, JC]) completeJob(job Job[JC]) {

@@ -482,7 +482,47 @@ func TestProcessor_StateCallback(t *testing.T) {
 	}
 }
 
-func TestNoStatusCounts(t *testing.T) {
+func TestFairness(t *testing.T) {
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	for i := 0; i < 5; i++ {
+		r.AddJob(MyJobContext{
+			Count: 0,
+		})
+	}
+	totalCount := 0
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				totalCount++
+				if totalCount > 10 {
+					return jc, STATE_DONE, nil, nil
+				}
+
+				jc.Count++
+
+				return jc, TRIGGER_STATE_NEW, nil, nil
+			},
+			Concurrency: 1,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, nil, nil)
+	assert.NoError(t, err)
+
+	err = p.Exec(context.Background(), r)
+	for _, job := range r.Jobs {
+		assert.Equal(t, 2, job.C.Count)
+	}
+}
+
+func TestStatusCountDedup(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
 	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
