@@ -522,6 +522,71 @@ func TestFairness(t *testing.T) {
 	}
 }
 
+func TestClose(t *testing.T) {
+	oc := MyOverallContext{}
+	ac := MyAppContext{}
+	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
+	r.AddJob(MyJobContext{
+		Count: 0,
+	})
+
+	for _, testCase := range []struct {
+		testName    string
+		states      []State[MyAppContext, MyOverallContext, MyJobContext]
+		shouldError bool
+	}{
+		{
+			testName: "keeps running",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{
+					TriggerState: TRIGGER_STATE_NEW,
+					Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+						time.Sleep(50 * time.Millisecond)
+						return jc, TRIGGER_STATE_NEW, nil, nil
+					},
+					Concurrency: 1,
+				},
+			},
+			shouldError: true,
+		},
+		{
+			testName: "completes",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{
+					TriggerState: TRIGGER_STATE_NEW,
+					Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+						time.Sleep(50 * time.Millisecond)
+						return jc, "done", nil, nil
+					},
+					Concurrency: 1,
+				},
+				{
+					TriggerState: "done",
+					Terminal:     true,
+				},
+			},
+			shouldError: false,
+		},
+	} {
+		t.Run(testCase.testName, func(t *testing.T) {
+			p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, testCase.states, nil, nil)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				cancel()
+			}()
+
+			err = p.Exec(ctx, r)
+			if testCase.shouldError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestStatusCountDedup(t *testing.T) {
 	oc := MyOverallContext{}
 	ac := MyAppContext{}
