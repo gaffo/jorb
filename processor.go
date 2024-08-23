@@ -287,7 +287,7 @@ func (p *Processor[AC, OC, JC]) Exec(ctx context.Context, r *Run[OC, JC]) error 
 	})
 
 	p.wg.Wait()
-	return nil
+	return ctx.Err()
 }
 
 func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg *sync.WaitGroup) {
@@ -407,6 +407,9 @@ func (s *StateExec[AC, OC, JC]) Run() {
 
 			rtn.Job = j
 			slog.Info("Returning job", "job", j.Id, "newState", j.State)
+			if s.ctx.Err() != nil {
+				return
+			}
 			s.returnChan <- rtn
 			slog.Info("Returned job", "job", j.Id, "newState", j.State)
 		}
