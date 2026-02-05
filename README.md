@@ -9,7 +9,7 @@ Jorb is that system for golang.
 I use it when I have complex batch jobs that need:
 - To not run in a massively complex distributed computing system
 - Easy to debug and expand while in flight (who doesn't code in the debugger)
-- Rate limiting per step
+- Rate limiting per step (including adaptive AIMD rate limiting)
 - Concurrency controls per step
 - Fancy Status bars (I found that https://github.com/vbauerster/mpb makes a good status listener, not provided currently)
 - Error recovery
@@ -24,12 +24,48 @@ OS.
 
 The unit tests in processor_test.go provide a pretty good example to get started, for instance https://github.com/gaffo/jorb/blob/main/processor_test.go#L111
 
+See `examples/aimd/main.go` for a complete example using adaptive rate limiting.
+
 # Installation
 To install Jorb, use:
 
 ```sh
 go get github.com/gaffo/jorb
 ```
+
+# Features
+
+## Adaptive Rate Limiting (AIMD)
+
+Jorb includes built-in adaptive rate limiting using AIMD (Additive Increase, Multiplicative Decrease) backoff:
+
+```go
+states := []jorb.State[AC, OC, JC]{
+    {
+        TriggerState: "api-call",
+        Exec:         makeAPICall,
+        Concurrency:  10,
+        RateLimit:    jorb.NewAIMDRateLimiter(100, 10, 200), // start, min, max req/s
+    },
+}
+```
+
+Return `&jorb.RateLimitError{Err: err}` from your exec function when rate limits are hit, and the processor will automatically back off and recover:
+
+```go
+func makeAPICall(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []jorb.KickRequest[JC], error) {
+    resp, err := api.Call()
+    if isRateLimited(err) {
+        return jc, "api-call", nil, &jorb.RateLimitError{Err: err}
+    }
+    return jc, "done", nil, nil
+}
+```
+
+The rate limiter automatically:
+- Backs off aggressively on errors (×0.5)
+- Increases slowly on success (+1 req/s)
+- Stays within configured bounds
 
 # Concepts
 
@@ -126,10 +162,7 @@ Throughput: speaking of throughput, there's definitely room for improvement here
 Too much work is stacking up on the return queue.
 
 Metrics: I'd really like to get metrics around how long states are taking, how many are executing on average, and where the bottle necks are. I think that many of the
-states can be dynamically adjusted on concurrency for optimal performance (when you do memory or disk or cpu heavy jobs). 
-
-No adaptive rate limiting or rate limit error handling. Many apis tell you when you're hitting rate limits, 
-need a way to message that back to the stae procssor so you don't have to manually dial in rate limits and can just let the system adapt.
+states can be dynamically adjusted on concurrency for optimal performance (when you do memory or disk or cpu heavy jobs).
 
 It uses slog, but doesn't setup a default logger, you can fix this by creating a file logger. It's VERY spammy if you don't. 
 
