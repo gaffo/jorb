@@ -8,13 +8,16 @@ import (
 	"runtime/pprof"
 	"sort"
 	"sync"
-
-	"golang.org/x/time/rate"
 )
 
 const (
 	TRIGGER_STATE_NEW = "new"
 )
+
+// RateLimiter is an interface for rate limiting
+type RateLimiter interface {
+	Wait(ctx context.Context) error
+}
 
 // State represents a state in a state machine for job processing.
 // It defines the behavior and configuration for a particular state.
@@ -37,7 +40,7 @@ type State[AC any, OC any, JC any] struct {
 	Concurrency int
 
 	// RateLimit is an optional rate limiter for controlling the execution rate of this state. Useful when calling rate limited apis.
-	RateLimit *rate.Limiter
+	RateLimit RateLimiter
 }
 
 // KickRequest struct is a job context with a requested state that the
@@ -400,8 +403,23 @@ func (s *StateExec[AC, OC, JC]) Run() {
 			j.C, j.State, rtn.KickRequests, err = s.state.Exec(s.ctx, s.ac, s.oc, j.C)
 			if err != nil {
 				j.StateErrors[priorState] = append(j.StateErrors[priorState], err.Error())
+				
+				// Handle rate limit errors with backoff
+				if IsRateLimitError(err) {
+					if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
+						backoff.Backoff()
+						if aimd, ok := backoff.(*AIMDRateLimiter); ok {
+							slog.Info("Rate limit hit, backing off", "job", j.Id, "state", s.state.TriggerState, "newRate", aimd.Current())
+						}
+					}
+				}
+				
 				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", err, "kickRequests", len(rtn.KickRequests))
 			} else {
+				// On success, increase rate if using AIMD
+				if aimd, ok := s.state.RateLimit.(*AIMDRateLimiter); ok {
+					aimd.onSuccess()
+				}
 				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "kickRequests", len(rtn.KickRequests))
 			}
 
