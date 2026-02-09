@@ -1009,3 +1009,208 @@ func TestProcessor_FirstStepExpands(t *testing.T) {
 	assert.Equal(t, 10, stateCount[STATE_DONE])
 	assert.Equal(t, 10*10, stateCount[STATE_DONE_TWO])
 }
+
+func TestProcessor_AIMDBackoff(t *testing.T) {
+	type AC struct{}
+	type OC struct{}
+	type JC struct {
+		attemptCount int
+	}
+
+	rateLimitCount := 0
+	successCount := 0
+
+	states := []State[AC, OC, JC]{
+		{
+			TriggerState: "new",
+			Exec: func(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []KickRequest[JC], error) {
+				jc.attemptCount++
+				// First 3 attempts hit rate limit, then succeed
+				if jc.attemptCount <= 3 {
+					rateLimitCount++
+					return jc, "new", nil, &RateLimitError{Err: fmt.Errorf("rate limited")}
+				}
+				successCount++
+				return jc, "done", nil, nil
+			},
+			Concurrency: 1,
+			RateLimit:   NewAIMDRateLimiter(100, 10, 200),
+		},
+		{
+			TriggerState: "done",
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(AC{}, states, &NilSerializer[OC, JC]{}, &NilStatusListener{})
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+
+	r := NewRun[OC, JC]("test-run", OC{})
+	r.AddJob(JC{})
+
+	err = p.Exec(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Exec failed: %v", err)
+	}
+
+	if rateLimitCount != 3 {
+		t.Errorf("Expected 3 rate limit errors, got %d", rateLimitCount)
+	}
+	if successCount != 1 {
+		t.Errorf("Expected 1 success, got %d", successCount)
+	}
+
+	// Verify job completed
+	if r.Jobs["0"].State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	}
+
+	// Verify errors were logged
+	if len(r.Jobs["0"].StateErrors["new"]) != 3 {
+		t.Errorf("Expected 3 errors logged for 'new' state, got %d", len(r.Jobs["0"].StateErrors["new"]))
+	}
+}
+
+func TestProcessor_AIMDWithMultipleJobs(t *testing.T) {
+	type AC struct{}
+	type OC struct{}
+	type JC struct {
+		id           string
+		shouldFail   bool
+		attemptCount int
+	}
+
+	aimdLimiter := NewAIMDRateLimiter(50, 10, 100)
+	initialRate := aimdLimiter.Current()
+
+	states := []State[AC, OC, JC]{
+		{
+			TriggerState: "process",
+			Exec: func(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []KickRequest[JC], error) {
+				jc.attemptCount++
+				if jc.shouldFail && jc.attemptCount == 1 {
+					return jc, "process", nil, &RateLimitError{Err: fmt.Errorf("rate limited")}
+				}
+				return jc, "done", nil, nil
+			},
+			Concurrency: 5,
+			RateLimit:   aimdLimiter,
+		},
+		{
+			TriggerState: "done",
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(AC{}, states, &NilSerializer[OC, JC]{}, &NilStatusListener{})
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+
+	r := NewRun[OC, JC]("test-run", OC{})
+	// Add jobs: some will fail once, others succeed immediately
+	for i := 0; i < 10; i++ {
+		r.AddJobWithState(JC{id: fmt.Sprintf("job-%d", i), shouldFail: i%3 == 0}, "process")
+	}
+
+	err = p.Exec(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Exec failed: %v", err)
+	}
+
+	// Verify all jobs completed
+	for _, job := range r.Jobs {
+		if job.State != "done" {
+			t.Errorf("Job %s not in 'done' state: %s", job.Id, job.State)
+		}
+	}
+
+	// Rate should have changed due to backoffs and successes
+	finalRate := aimdLimiter.Current()
+	if finalRate == initialRate {
+		t.Errorf("Expected rate to change from initial %f, but it stayed the same", initialRate)
+	}
+
+	// Rate should be within bounds
+	if finalRate < 10 || finalRate > 100 {
+		t.Errorf("Final rate %f outside bounds [10, 100]", finalRate)
+	}
+}
+
+func TestProcessor_StandardRateLimiterStillWorks(t *testing.T) {
+	type AC struct{}
+	type OC struct{}
+	type JC struct{}
+
+	states := []State[AC, OC, JC]{
+		{
+			TriggerState: "new",
+			Exec: func(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []KickRequest[JC], error) {
+				return jc, "done", nil, nil
+			},
+			Concurrency: 1,
+			RateLimit:   rate.NewLimiter(10, 10),
+		},
+		{
+			TriggerState: "done",
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(AC{}, states, &NilSerializer[OC, JC]{}, &NilStatusListener{})
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+
+	r := NewRun[OC, JC]("test-run", OC{})
+	r.AddJob(JC{})
+
+	err = p.Exec(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Exec failed: %v", err)
+	}
+
+	if r.Jobs["0"].State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	}
+}
+
+func TestProcessor_NoRateLimiterStillWorks(t *testing.T) {
+	type AC struct{}
+	type OC struct{}
+	type JC struct{}
+
+	states := []State[AC, OC, JC]{
+		{
+			TriggerState: "new",
+			Exec: func(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []KickRequest[JC], error) {
+				return jc, "done", nil, nil
+			},
+			Concurrency: 1,
+			RateLimit:   nil,
+		},
+		{
+			TriggerState: "done",
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(AC{}, states, &NilSerializer[OC, JC]{}, &NilStatusListener{})
+	if err != nil {
+		t.Fatalf("Failed to create processor: %v", err)
+	}
+
+	r := NewRun[OC, JC]("test-run", OC{})
+	r.AddJob(JC{})
+
+	err = p.Exec(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Exec failed: %v", err)
+	}
+
+	if r.Jobs["0"].State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	}
+}
