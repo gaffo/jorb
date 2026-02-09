@@ -65,14 +65,14 @@ func TestAIMDRateLimiter_OnSuccess(t *testing.T) {
 	limiter := NewAIMDRateLimiter(100, 10, 200)
 
 	// Increase: 100 + 1 = 101
-	limiter.onSuccess()
+	limiter.OnSuccess()
 	if limiter.Current() != 101 {
 		t.Errorf("Expected rate of 101 after success, got %f", limiter.Current())
 	}
 
 	// Set to near max
 	for i := 0; i < 100; i++ {
-		limiter.onSuccess()
+		limiter.OnSuccess()
 	}
 
 	if limiter.Current() != 200 {
@@ -80,7 +80,7 @@ func TestAIMDRateLimiter_OnSuccess(t *testing.T) {
 	}
 
 	// One more should still be at max
-	limiter.onSuccess()
+	limiter.OnSuccess()
 	if limiter.Current() != 200 {
 		t.Errorf("Expected rate to stay at max of 200, got %f", limiter.Current())
 	}
@@ -91,7 +91,7 @@ func TestAIMDRateLimiter_SawtoothPattern(t *testing.T) {
 
 	// Simulate sawtooth: increase slowly, decrease quickly
 	for i := 0; i < 50; i++ {
-		limiter.onSuccess()
+		limiter.OnSuccess()
 	}
 	if limiter.Current() != 150 {
 		t.Errorf("Expected rate of 150 after 50 successes, got %f", limiter.Current())
@@ -104,7 +104,7 @@ func TestAIMDRateLimiter_SawtoothPattern(t *testing.T) {
 
 	// Increase again
 	for i := 0; i < 25; i++ {
-		limiter.onSuccess()
+		limiter.OnSuccess()
 	}
 	if limiter.Current() != 100 {
 		t.Errorf("Expected rate of 100 after 25 more successes, got %f", limiter.Current())
@@ -120,7 +120,7 @@ func TestAIMDRateLimiter_Integration(t *testing.T) {
 
 	// Simulate successful operations - rate should increase
 	for i := 0; i < 10; i++ {
-		limiter.onSuccess()
+		limiter.OnSuccess()
 	}
 	if limiter.Current() != 110 {
 		t.Errorf("Expected rate of 110 after 10 successes, got %f", limiter.Current())
@@ -134,7 +134,7 @@ func TestAIMDRateLimiter_Integration(t *testing.T) {
 
 	// Recover with successes
 	for i := 0; i < 20; i++ {
-		limiter.onSuccess()
+		limiter.OnSuccess()
 	}
 	if limiter.Current() != 75 {
 		t.Errorf("Expected rate of 75 after recovery, got %f", limiter.Current())
@@ -164,7 +164,7 @@ func TestAIMDRateLimiter_Concurrency(t *testing.T) {
 	// Concurrent successes
 	for i := 0; i < 10; i++ {
 		go func() {
-			limiter.onSuccess()
+			limiter.OnSuccess()
 			done <- true
 		}()
 	}
@@ -202,7 +202,7 @@ func TestAIMDRateLimiter_BoundaryConditions(t *testing.T) {
 			
 			// Should not panic
 			limiter.Backoff()
-			limiter.onSuccess()
+			limiter.OnSuccess()
 			
 			current := limiter.Current()
 			if current < tt.min || current > tt.max {

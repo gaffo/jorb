@@ -405,17 +405,14 @@ func (s *StateExec[AC, OC, JC]) Run() {
 				if IsRateLimitError(err) {
 					if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
 						backoff.Backoff()
-						if aimd, ok := backoff.(*AIMDRateLimiter); ok {
-							slog.Info("Rate limit hit, backing off", "job", j.Id, "state", s.state.TriggerState, "newRate", aimd.Current())
-						}
 					}
 				}
 				
 				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", err, "kickRequests", len(rtn.KickRequests))
 			} else {
-				// On success, increase rate if using AIMD
-				if aimd, ok := s.state.RateLimit.(*AIMDRateLimiter); ok {
-					aimd.onSuccess()
+				// On success, increase rate if using adaptive rate limiter
+				if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
+					backoff.OnSuccess()
 				}
 				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "kickRequests", len(rtn.KickRequests))
 			}

@@ -3,6 +3,7 @@ package jorb
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"golang.org/x/time/rate"
@@ -12,6 +13,7 @@ import (
 // to support dynamic rate adjustment based on downstream feedback
 type BackoffRateLimiter interface {
 	Backoff()
+	OnSuccess()
 }
 
 // RateLimitError signals that a rate limit was hit and backoff should occur
@@ -57,25 +59,31 @@ func (a *AIMDRateLimiter) Backoff() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	oldRate := a.current
 	a.current *= 0.5
 	if a.current < a.min {
 		a.current = a.min
 	}
 	a.Limiter.SetLimit(rate.Limit(a.current))
 	a.Limiter.SetBurst(int(a.current))
+	slog.Info("AIMD backoff", "oldRate", oldRate, "newRate", a.current)
 }
 
-// onSuccess is called internally by jorb on successful operations - additive increase
-func (a *AIMDRateLimiter) onSuccess() {
+// OnSuccess implements BackoffRateLimiter - additive increase
+func (a *AIMDRateLimiter) OnSuccess() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	oldRate := a.current
 	a.current += 1
 	if a.current > a.max {
 		a.current = a.max
 	}
 	a.Limiter.SetLimit(rate.Limit(a.current))
 	a.Limiter.SetBurst(int(a.current))
+	if a.current != oldRate {
+		slog.Info("AIMD success", "oldRate", oldRate, "newRate", a.current)
+	}
 }
 
 // Current returns the current rate limit
