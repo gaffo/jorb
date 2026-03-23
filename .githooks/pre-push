@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+ROOT="$(git rev-parse --show-toplevel)"
+exec sh "$ROOT/scripts/verify-go.sh"

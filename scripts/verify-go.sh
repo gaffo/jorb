@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# Same checks as .github/workflows/go.yml
+set -eu
+cd "$(dirname "$0")/.."
+go build -v ./...
+go test -v ./...
