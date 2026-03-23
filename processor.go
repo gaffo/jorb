@@ -400,14 +400,17 @@ func (s *StateExec[AC, OC, JC]) Run() {
 			j.C, j.State, rtn.KickRequests, err = s.state.Exec(s.ctx, s.ac, s.oc, j.C)
 			if err != nil {
 				j.StateErrors[priorState] = append(j.StateErrors[priorState], err.Error())
-				
+
 				// Handle rate limit errors with backoff
 				if IsRateLimitError(err) {
 					if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
 						backoff.Backoff()
+					} else if s.state.RateLimit != nil {
+						slog.Debug("RateLimitError but RateLimit does not implement BackoffRateLimiter; adaptive backoff skipped",
+							"state", s.state.TriggerState)
 					}
 				}
-				
+
 				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", err, "kickRequests", len(rtn.KickRequests))
 			} else {
 				// On success, increase rate if using adaptive rate limiter

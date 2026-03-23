@@ -54,7 +54,7 @@ Return `&jorb.RateLimitError{Err: err}` from your exec function when rate limits
 
 ```go
 func makeAPICall(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []jorb.KickRequest[JC], error) {
-    resp, err := api.Call()
+    _, err := api.Call()
     if isRateLimited(err) {
         return jc, "api-call", nil, &jorb.RateLimitError{Err: err}
     }
@@ -62,10 +62,14 @@ func makeAPICall(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []jorb.K
 }
 ```
 
+Use an [`AIMDRateLimiter`](ratelimit.go) as `RateLimit` so backoff applies. A plain `*rate.Limiter` still works for fixed limits, but returning [`RateLimitError`](ratelimit.go) without an [`BackoffRateLimiter`](ratelimit.go) only records the error (see `slog.Debug` in the processor).
+
+Tune AIMD with [`NewAIMDRateLimiterWithConfig`](ratelimit.go) and [`AIMDRateLimiterConfig`](ratelimit.go): additive increase runs at most **once per second** by default (not once per successful job), and concurrent multiplicative backoffs are **coalesced** within a short window so many workers returning `RateLimitError` at once do not apply ×0.5 repeatedly. Constants [`AIMDIncreaseEverySuccess`](ratelimit.go) and [`AIMDDebounceDisabled`](ratelimit.go) opt out for testing or special cases.
+
 The rate limiter automatically:
-- Backs off aggressively on errors (×0.5)
-- Increases slowly on success (+1 req/s)
-- Stays within configured bounds
+- Backs off on rate-limit errors (×0.5 per effective backoff step, clamped to min)
+- Increases on success (+1 req/s at most once per increase interval by default)
+- Stays within configured min/max bounds (initial/min/max are normalized, including `min > max` and non-positive inputs)
 
 # Concepts
 
