@@ -2,6 +2,21 @@ package jorb
 
 import "time"
 
+// cloneStateErrorsMap returns a deep copy so workers can append errors without racing
+// concurrent JSON serialization of the Run that still holds the original job map.
+func cloneStateErrorsMap(m map[string][]string) map[string][]string {
+	if m == nil {
+		return map[string][]string{}
+	}
+	out := make(map[string][]string, len(m))
+	for k, v := range m {
+		s := make([]string, len(v))
+		copy(s, v)
+		out[k] = s
+	}
+	return out
+}
+
 // Job represents the current processing state of any job
 type Job[JC any] struct {
 	Id          string              // Id is a unique identifier for the job

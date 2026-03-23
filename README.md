@@ -64,11 +64,11 @@ func makeAPICall(ctx context.Context, ac AC, oc OC, jc JC) (JC, string, []jorb.K
 
 Use an [`AIMDRateLimiter`](ratelimit.go) as `RateLimit` so backoff applies. A plain `*rate.Limiter` still works for fixed limits, but returning [`RateLimitError`](ratelimit.go) without an [`BackoffRateLimiter`](ratelimit.go) only records the error (see `slog.Debug` in the processor).
 
-Tune AIMD with [`NewAIMDRateLimiterWithConfig`](ratelimit.go) and [`AIMDRateLimiterConfig`](ratelimit.go): additive increase runs at most **once per second** by default (not once per successful job), and concurrent multiplicative backoffs are **coalesced** within a short window so many workers returning `RateLimitError` at once do not apply ×0.5 repeatedly. Constants [`AIMDIncreaseEverySuccess`](ratelimit.go) and [`AIMDDebounceDisabled`](ratelimit.go) opt out for testing or special cases.
+Tune AIMD with [`NewAIMDRateLimiterWithConfig`](ratelimit.go) and [`AIMDRateLimiterConfig`](ratelimit.go). Additive increase is **at most one +1 per `IncreaseInterval`** (default 1s) since the last applied increase. Pass a [`Clock`](ratelimit.go) to control time in tests. Concurrent multiplicative backoffs are **coalesced** by default; set **`DisableBackoffMerge`** so every `Backoff()` applies a full ×0.5.
 
 The rate limiter automatically:
 - Backs off on rate-limit errors (×0.5 per effective backoff step, clamped to min)
-- Increases on success (+1 req/s at most once per increase interval by default)
+- Increases on success (+1 per increase interval while under max)
 - Stays within configured min/max bounds (initial/min/max are normalized, including `min > max` and non-positive inputs)
 
 # Concepts

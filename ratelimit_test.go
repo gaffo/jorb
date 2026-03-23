@@ -10,16 +10,44 @@ import (
 	"time"
 )
 
-// testAIMDLegacy matches pre-debounce AIMD math (per-success / per-backoff steps) for unit tests.
-func testAIMDLegacy(t *testing.T, initial, min, max float64) *AIMDRateLimiter {
+// fakeClock is a deterministic clock for tests. Advance with Add between steps.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock() *fakeClock {
+	return &fakeClock{t: time.Unix(1_700_000_000, 0)}
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Add(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// testAIMD returns a limiter with a fake clock, 1ms increase interval, and no backoff merge.
+// Call clk.Add(interval) between OnSuccess steps that should each apply +1.
+func testAIMD(t testing.TB, clk *fakeClock, initial, min, max float64) *AIMDRateLimiter {
 	t.Helper()
 	return NewAIMDRateLimiterWithConfig(AIMDRateLimiterConfig{
-		Initial:          initial,
-		Min:              min,
-		Max:              max,
-		IncreaseInterval: AIMDIncreaseEverySuccess,
-		BackoffDebounce:  AIMDDebounceDisabled,
+		Initial:             initial,
+		Min:                 min,
+		Max:                 max,
+		Clock:               clk,
+		IncreaseInterval:    time.Millisecond,
+		DisableBackoffMerge: true,
 	})
+}
+
+func tickBetweenIncreases(clk *fakeClock) {
+	clk.Add(time.Millisecond)
 }
 
 func TestRateLimitError(t *testing.T) {
@@ -44,7 +72,8 @@ func TestRateLimitError(t *testing.T) {
 }
 
 func TestAIMDRateLimiter_Backoff(t *testing.T) {
-	limiter := testAIMDLegacy(t, 100, 10, 200)
+	clk := newFakeClock()
+	limiter := testAIMD(t, clk, 100, 10, 200)
 
 	if limiter.Current() != 100 {
 		t.Errorf("Expected initial rate of 100, got %f", limiter.Current())
@@ -72,14 +101,11 @@ func TestAIMDRateLimiter_Backoff(t *testing.T) {
 }
 
 func TestAIMDRateLimiter_OnSuccess(t *testing.T) {
-	limiter := testAIMDLegacy(t, 100, 10, 200)
-
-	limiter.OnSuccess()
-	if limiter.Current() != 101 {
-		t.Errorf("Expected rate of 101 after success, got %f", limiter.Current())
-	}
+	clk := newFakeClock()
+	limiter := testAIMD(t, clk, 100, 10, 200)
 
 	for i := 0; i < 100; i++ {
+		tickBetweenIncreases(clk)
 		limiter.OnSuccess()
 	}
 
@@ -94,9 +120,11 @@ func TestAIMDRateLimiter_OnSuccess(t *testing.T) {
 }
 
 func TestAIMDRateLimiter_SawtoothPattern(t *testing.T) {
-	limiter := testAIMDLegacy(t, 100, 10, 200)
+	clk := newFakeClock()
+	limiter := testAIMD(t, clk, 100, 10, 200)
 
 	for i := 0; i < 50; i++ {
+		tickBetweenIncreases(clk)
 		limiter.OnSuccess()
 	}
 	if limiter.Current() != 150 {
@@ -109,6 +137,7 @@ func TestAIMDRateLimiter_SawtoothPattern(t *testing.T) {
 	}
 
 	for i := 0; i < 25; i++ {
+		tickBetweenIncreases(clk)
 		limiter.OnSuccess()
 	}
 	if limiter.Current() != 100 {
@@ -121,9 +150,11 @@ func TestAIMDRateLimiter_ImplementsBackoffRateLimiter(t *testing.T) {
 }
 
 func TestAIMDRateLimiter_Integration(t *testing.T) {
-	limiter := testAIMDLegacy(t, 100, 10, 200)
+	clk := newFakeClock()
+	limiter := testAIMD(t, clk, 100, 10, 200)
 
 	for i := 0; i < 10; i++ {
+		tickBetweenIncreases(clk)
 		limiter.OnSuccess()
 	}
 	if limiter.Current() != 110 {
@@ -136,6 +167,7 @@ func TestAIMDRateLimiter_Integration(t *testing.T) {
 	}
 
 	for i := 0; i < 20; i++ {
+		tickBetweenIncreases(clk)
 		limiter.OnSuccess()
 	}
 	if limiter.Current() != 75 {
@@ -151,7 +183,8 @@ func TestAIMDRateLimiter_Integration(t *testing.T) {
 }
 
 func TestAIMDRateLimiter_Concurrency(t *testing.T) {
-	limiter := testAIMDLegacy(t, 100, 10, 200)
+	clk := newFakeClock()
+	limiter := testAIMD(t, clk, 100, 10, 200)
 	done := make(chan bool)
 
 	for i := 0; i < 10; i++ {
@@ -172,6 +205,9 @@ func TestAIMDRateLimiter_Concurrency(t *testing.T) {
 		<-done
 	}
 
+	// Advance clock so a single OnSuccess can apply if below max
+	clk.Add(time.Millisecond)
+
 	current := limiter.Current()
 	if current < 10 || current > 200 {
 		t.Errorf("Expected rate to be within bounds [10, 200], got %f", current)
@@ -179,12 +215,14 @@ func TestAIMDRateLimiter_Concurrency(t *testing.T) {
 }
 
 func TestAIMDRateLimiter_DefaultIncreaseDebouncing(t *testing.T) {
+	clk := newFakeClock()
 	limiter := NewAIMDRateLimiterWithConfig(AIMDRateLimiterConfig{
-		Initial:          100,
-		Min:              10,
-		Max:              200,
-		IncreaseInterval: 500 * time.Millisecond,
-		BackoffDebounce:  AIMDDebounceDisabled,
+		Initial:             100,
+		Min:                 10,
+		Max:                 200,
+		Clock:               clk,
+		IncreaseInterval:    500 * time.Millisecond,
+		DisableBackoffMerge: true,
 	})
 
 	for i := 0; i < 50; i++ {
@@ -194,7 +232,7 @@ func TestAIMDRateLimiter_DefaultIncreaseDebouncing(t *testing.T) {
 		t.Errorf("Expected +1 over 500ms window, got %f", got)
 	}
 
-	time.Sleep(600 * time.Millisecond)
+	clk.Add(600 * time.Millisecond)
 	limiter.OnSuccess()
 	if got := limiter.Current(); got != 102 {
 		t.Errorf("Expected second increase after interval, got %f", got)
@@ -202,7 +240,13 @@ func TestAIMDRateLimiter_DefaultIncreaseDebouncing(t *testing.T) {
 }
 
 func TestAIMDRateLimiter_DefaultBackoffCoalescing(t *testing.T) {
-	limiter := NewAIMDRateLimiter(100, 10, 200)
+	clk := newFakeClock()
+	limiter := NewAIMDRateLimiterWithConfig(AIMDRateLimiterConfig{
+		Initial: 100,
+		Min:     10,
+		Max:     200,
+		Clock:   clk,
+	})
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -212,9 +256,28 @@ func TestAIMDRateLimiter_DefaultBackoffCoalescing(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// Without coalescing, 20 halvings would hit min; with default debounce, expect a single ×0.5 from the burst.
 	if got := limiter.Current(); got != 50 {
 		t.Errorf("Expected single effective backoff in debounce window (~50), got %f", got)
+	}
+}
+
+func TestAIMDRateLimiter_AtMaxDoesNotBlockRecovery(t *testing.T) {
+	clk := newFakeClock()
+	limiter := NewAIMDRateLimiterWithConfig(AIMDRateLimiterConfig{
+		Initial:             200,
+		Min:                 10,
+		Max:                 200,
+		Clock:               clk,
+		IncreaseInterval:    time.Hour,
+		DisableBackoffMerge: true,
+	})
+	limiter.Backoff()
+	if got := limiter.Current(); got != 100 {
+		t.Fatalf("after backoff want 100, got %f", got)
+	}
+	limiter.OnSuccess()
+	if got := limiter.Current(); got != 101 {
+		t.Fatalf("recovery increase blocked: want 101, got %f", got)
 	}
 }
 

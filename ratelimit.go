@@ -14,20 +14,31 @@ import (
 
 var _ RateLimiter = (*AIMDRateLimiter)(nil)
 
-// Sentinel durations for [AIMDRateLimiterConfig].
-const (
-	// AIMDIncreaseEverySuccess disables time-based additive debouncing: each OnSuccess
-	// applies +1 (capped at max). Useful mainly for tests or very aggressive ramp-up.
-	AIMDIncreaseEverySuccess time.Duration = -1
-	// AIMDDebounceDisabled applies every Backoff() fully (no merging of backoffs in time).
-	AIMDDebounceDisabled time.Duration = -1
-)
-
 const (
 	defaultIncreaseInterval = time.Second
 	defaultBackoffDebounce  = 500 * time.Millisecond
 	minRate                 = 1e-9
 )
+
+// Clock supplies the current time for AIMD debouncing and additive windows.
+// Use nil in [AIMDRateLimiterConfig] for wall-clock time. In tests, use a fake
+// implementation and advance it so behavior is deterministic without sleeps.
+type Clock interface {
+	Now() time.Time
+}
+
+type wallClock struct{}
+
+func (wallClock) Now() time.Time { return time.Now() }
+
+var _ Clock = wallClock{}
+
+func clockOrDefault(c Clock) Clock {
+	if c == nil {
+		return wallClock{}
+	}
+	return c
+}
 
 // BackoffRateLimiter is an optional interface that rate limiters can implement
 // to support dynamic rate adjustment based on downstream feedback.
@@ -56,18 +67,28 @@ func IsRateLimitError(err error) bool {
 }
 
 // AIMDRateLimiterConfig configures [NewAIMDRateLimiterWithConfig].
-// Zero IncreaseInterval selects a 1s additive window; zero BackoffDebounce selects 500ms
-// coalescing of multiplicative backoffs (reduces ×0.5 stacking when many workers hit limits at once).
-// Use [AIMDIncreaseEverySuccess] / [AIMDDebounceDisabled] to opt out.
+//
+// Increase: at most one additive +1 per IncreaseInterval measured from the last applied
+// increase (zero means default one second). Use a [Clock] to control this in tests.
+//
+// Backoff: zero BackoffDebounce selects 500ms coalescing of multiplicative steps.
+// Set DisableBackoffMerge so each Backoff() applies a full ×0.5.
 type AIMDRateLimiterConfig struct {
 	Initial float64
 	Min     float64
 	Max     float64
-	// IncreaseInterval is the minimum time between additive +1 steps. Each OnSuccess may run
-	// more often, but the limit only rises at most once per interval (unless AIMDIncreaseEverySuccess).
+
+	// IncreaseInterval is the minimum time between additive +1 steps (default 1s if zero).
 	IncreaseInterval time.Duration
-	// BackoffDebounce merges multiple Backoff calls within this window into at most one ×0.5 step.
+
+	// BackoffDebounce merges Backoff calls within this duration (default 500ms if zero).
 	BackoffDebounce time.Duration
+	// DisableBackoffMerge, if true, applies every Backoff() fully (no merge).
+	DisableBackoffMerge bool
+
+	// Clock is used for debouncing and increase timing; nil uses wall clock.
+	Clock Clock
+
 	// Logger receives Debug logs for rate transitions; nil disables logging.
 	Logger *slog.Logger
 }
@@ -76,15 +97,15 @@ type AIMDRateLimiterConfig struct {
 // The underlying golang.org/x/time/rate limiter is not exposed: use [AIMDRateLimiter.Wait] and the AIMD
 // methods so min/max invariants stay consistent.
 type AIMDRateLimiter struct {
-	lim *rate.Limiter
-	mu  sync.Mutex
+	lim   *rate.Limiter
+	clock Clock
+	mu    sync.Mutex
 
 	current float64
 	min     float64
 	max     float64
 
-	increaseEverySuccess bool
-	increaseInterval     time.Duration
+	increaseInterval time.Duration
 
 	backoffDebounceDisabled bool
 	backoffDebounce         time.Duration
@@ -109,15 +130,12 @@ func NewAIMDRateLimiter(initial, min, max float64) *AIMDRateLimiter {
 func NewAIMDRateLimiterWithConfig(cfg AIMDRateLimiterConfig) *AIMDRateLimiter {
 	initial, minR, maxR := normalizeAIMDRates(cfg.Initial, cfg.Min, cfg.Max)
 
-	incEvery := cfg.IncreaseInterval == AIMDIncreaseEverySuccess
 	incInterval := cfg.IncreaseInterval
-	if incEvery {
-		incInterval = 0
-	} else if incInterval == 0 {
+	if incInterval == 0 {
 		incInterval = defaultIncreaseInterval
 	}
 
-	backoffOff := cfg.BackoffDebounce == AIMDDebounceDisabled
+	backoffOff := cfg.DisableBackoffMerge
 	backoffDeb := cfg.BackoffDebounce
 	if backoffOff {
 		backoffDeb = 0
@@ -125,12 +143,14 @@ func NewAIMDRateLimiterWithConfig(cfg AIMDRateLimiterConfig) *AIMDRateLimiter {
 		backoffDeb = defaultBackoffDebounce
 	}
 
+	clk := clockOrDefault(cfg.Clock)
+
 	a := &AIMDRateLimiter{
 		lim:                     rate.NewLimiter(rate.Limit(initial), burstForRate(initial)),
+		clock:                   clk,
 		current:                 initial,
 		min:                     minR,
 		max:                     maxR,
-		increaseEverySuccess:    incEvery,
 		increaseInterval:        incInterval,
 		backoffDebounceDisabled: backoffOff,
 		backoffDebounce:         backoffDeb,
@@ -145,17 +165,19 @@ func (a *AIMDRateLimiter) Wait(ctx context.Context) error {
 	return a.lim.Wait(ctx)
 }
 
-// Backoff applies multiplicative decrease (×0.5, clamped to min), coalesced within BackoffDebounce
-// unless [AIMDDebounceDisabled] was set.
+// Backoff applies multiplicative decrease (×0.5, clamped to min), optionally coalesced within BackoffDebounce.
+// It resets additive scheduling so recovery after a drop is not delayed by an old window.
 func (a *AIMDRateLimiter) Backoff() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	now := time.Now()
+	now := a.clock.Now()
 	if !a.backoffDebounceDisabled && !a.lastBackoff.IsZero() && now.Sub(a.lastBackoff) < a.backoffDebounce {
 		return
 	}
 	a.lastBackoff = now
+
+	a.lastIncrease = time.Time{}
 
 	oldRate := a.current
 	a.current *= 0.5
@@ -166,19 +188,20 @@ func (a *AIMDRateLimiter) Backoff() {
 	a.logTransition("AIMD backoff", oldRate, a.current)
 }
 
-// OnSuccess applies additive increase (+1 req/s per increase window, capped at max), or on every
-// success when configured with [AIMDIncreaseEverySuccess].
+// OnSuccess applies at most one additive +1 per IncreaseInterval (capped at max).
 func (a *AIMDRateLimiter) OnSuccess() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	now := time.Now()
-	if !a.increaseEverySuccess {
-		if !a.lastIncrease.IsZero() && now.Sub(a.lastIncrease) < a.increaseInterval {
-			return
-		}
-		a.lastIncrease = now
+	if a.current >= a.max {
+		return
 	}
+
+	now := a.clock.Now()
+	if !a.lastIncrease.IsZero() && now.Sub(a.lastIncrease) < a.increaseInterval {
+		return
+	}
+	a.lastIncrease = now
 
 	oldRate := a.current
 	a.current++

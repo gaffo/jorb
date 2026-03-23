@@ -386,6 +386,9 @@ func (s *StateExec[AC, OC, JC]) Run() {
 				return
 			}
 
+			// Job is passed by value but StateErrors is a map: clone so we don't race Serialize reading r.Jobs.
+			j.StateErrors = cloneStateErrorsMap(j.StateErrors)
+
 			if s.state.RateLimit != nil {
 				s.state.RateLimit.Wait(s.ctx)
 				slog.Info("LimiterAllowed", "worker", s.i, "state", s.state.TriggerState, "job", j.Id)
