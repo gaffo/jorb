@@ -1,0 +1,17 @@
+# https://github.com/evilmartians/lefthook
+# Optional: go install github.com/evilmartians/lefthook@latest
+# Git uses .githooks/ (see scripts/install-git-hooks.sh); those scripts call lefthook when available.
+pre-commit:
+  commands:
+    verify:
+      run: sh scripts/verify-go.sh
+
+pre-push:
+  commands:
+    verify:
+      run: sh scripts/verify-go.sh
+
+commit-msg:
+  commands:
+    message-format:
+      run: python3 scripts/validate-commit-msg.py {1}

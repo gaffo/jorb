@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+ROOT="$(git rev-parse --show-toplevel)"
+exec python3 "$ROOT/scripts/validate-commit-msg.py" "$1"
