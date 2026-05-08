@@ -1,6 +1,8 @@
 package jorb
 
 import (
+	"strings"
+	"time"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,4 +79,54 @@ func Test_SerializeWithError(t *testing.T) {
 		actualRun.Jobs[k] = j
 	}
 	assert.True(t, r.Equal(actualRun))
+}
+
+// TestJsonSerializer_Performance_SmallRecords verifies that serializing 30k
+// small jobs completes in under 4 seconds.
+func TestJsonSerializer_Performance_SmallRecords(t *testing.T) {
+	const jobCount = 30_000
+	const maxDuration = 200 * time.Millisecond
+
+	run := NewRun[MyOverallContext, MyJobContext]("perf", MyOverallContext{Name: "overall"})
+	for i := 0; i < jobCount; i++ {
+		run.AddJob(MyJobContext{Count: i, Name: fmt.Sprintf("job-%d", i)})
+	}
+
+	serializer := NewJsonSerializer[MyOverallContext, MyJobContext](
+filepath.Join(t.TempDir(), "perf.json"),
+	)
+
+	start := time.Now()
+	require.NoError(t, serializer.Serialize(*run))
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, maxDuration,
+"serialize of %d small jobs took %v, expected under %v", jobCount, elapsed, maxDuration)
+}
+
+// TestJsonSerializer_Performance_LargeRecords verifies that serializing 30k
+// jobs with ~20KB payloads (representative of real codebase-analysis runs)
+// completes in under 4 seconds.
+func TestJsonSerializer_Performance_LargeRecords(t *testing.T) {
+	const jobCount = 30_000
+	const recordSize = 20_000
+	const maxDuration = 4 * time.Second
+
+	padding := strings.Repeat("x", recordSize)
+
+	run := NewRun[MyOverallContext, MyJobContext]("perf-large", MyOverallContext{Name: "overall"})
+	for i := 0; i < jobCount; i++ {
+		run.AddJob(MyJobContext{Count: i, Name: fmt.Sprintf("job-%d", i), String: padding})
+	}
+
+	serializer := NewJsonSerializer[MyOverallContext, MyJobContext](
+filepath.Join(t.TempDir(), "perf-large.json"),
+	)
+
+	start := time.Now()
+	require.NoError(t, serializer.Serialize(*run))
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, maxDuration,
+"serialize of %d 20KB jobs took %v, expected under %v", jobCount, elapsed, maxDuration)
 }
