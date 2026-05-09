@@ -20,6 +20,9 @@ type Serializer[OC any, JC any] interface {
 // in the File field, there  is a anonymous variable type check
 type JsonSerializer[OC any, JC any] struct {
 	File string
+	// Pretty, when true, enables indented JSON (human-readable, slower and larger on disk).
+	// When false (zero value), output is compact—preferred for large runs.
+	Pretty bool
 }
 
 // NewJsonSerializer create a new instance of the JsonSerializer struct.
@@ -59,7 +62,9 @@ func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 	buf := &bytes.Buffer{}
 
 	encoder := json.NewEncoder(buf)
-	encoder.SetIndent("", "  ")
+	if js.Pretty {
+		encoder.SetIndent("", "  ")
+	}
 	err = encoder.Encode(run)
 	if err != nil {
 		return err

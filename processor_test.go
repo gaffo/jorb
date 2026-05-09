@@ -19,23 +19,6 @@ import (
 
 // import "github.com/stretchr/testify/assert"
 
-// JobContext represents my Job's context, eg the state of doing work
-type MyJobContext struct {
-	Name       string
-	Count      int
-	StringList []string
-	String     string
-}
-
-// MyOverallContext any non-job specific state that is important for the overall run
-type MyOverallContext struct {
-	Name string
-}
-
-// MyAppContext is all of my application processing, clients, etc reference for the job processors
-type MyAppContext struct {
-}
-
 const (
 	STATE_DONE     = "done"
 	STATE_MIDDLE   = "middle"
