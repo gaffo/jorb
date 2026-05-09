@@ -1,12 +1,12 @@
 package jorb
 
 import (
-	"strings"
-	"time"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,7 +93,7 @@ func TestJsonSerializer_Performance_SmallRecords(t *testing.T) {
 	}
 
 	serializer := NewJsonSerializer[MyOverallContext, MyJobContext](
-filepath.Join(t.TempDir(), "perf.json"),
+		filepath.Join(t.TempDir(), "perf.json"),
 	)
 
 	start := time.Now()
@@ -101,13 +101,16 @@ filepath.Join(t.TempDir(), "perf.json"),
 	elapsed := time.Since(start)
 
 	assert.Less(t, elapsed, maxDuration,
-"serialize of %d small jobs took %v, expected under %v", jobCount, elapsed, maxDuration)
+		"serialize of %d small jobs took %v, expected under %v", jobCount, elapsed, maxDuration)
 }
 
 // TestJsonSerializer_Performance_LargeRecords verifies that serializing 30k
 // jobs with ~20KB payloads (representative of real codebase-analysis runs)
 // completes in under 4 seconds.
 func TestJsonSerializer_Performance_LargeRecords(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large payload perf check; run without -short for full coverage")
+	}
 	const jobCount = 30_000
 	const recordSize = 20_000
 	const maxDuration = 4 * time.Second
@@ -120,7 +123,7 @@ func TestJsonSerializer_Performance_LargeRecords(t *testing.T) {
 	}
 
 	serializer := NewJsonSerializer[MyOverallContext, MyJobContext](
-filepath.Join(t.TempDir(), "perf-large.json"),
+		filepath.Join(t.TempDir(), "perf-large.json"),
 	)
 
 	start := time.Now()
@@ -128,5 +131,5 @@ filepath.Join(t.TempDir(), "perf-large.json"),
 	elapsed := time.Since(start)
 
 	assert.Less(t, elapsed, maxDuration,
-"serialize of %d 20KB jobs took %v, expected under %v", jobCount, elapsed, maxDuration)
+		"serialize of %d 20KB jobs took %v, expected under %v", jobCount, elapsed, maxDuration)
 }

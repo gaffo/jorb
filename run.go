@@ -65,7 +65,7 @@ func (r *Run[OC, JC]) AddJobWithState(jc JC, state string) {
 		StateErrors: map[string][]string{},
 	}
 
-	slog.Info("AddJob", "run", r.Name, "job", j, "totalJobs", len(r.Jobs))
+	slog.Debug("AddJob", "run", r.Name, "job", j, "totalJobs", len(r.Jobs))
 	r.Jobs[id] = j.UpdateLastEvent()
 }
 

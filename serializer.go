@@ -76,7 +76,7 @@ func (js JsonSerializer[OC, JC]) Serialize(run Run[OC, JC]) error {
 		return err
 	}
 
-	slog.Info("Serialized", "file", js.File, "delta", time.Since(start))
+	slog.Debug("Serialized", "file", js.File, "delta", time.Since(start))
 
 	return nil
 }
@@ -106,7 +106,7 @@ func (js JsonSerializer[OC, JC]) Deserialize() (*Run[OC, JC], error) {
 		return nil, err
 	}
 
-	slog.Info("Deserialized", "file", js.File, "delta", time.Since(start))
+	slog.Debug("Deserialized", "file", js.File, "delta", time.Since(start))
 
 	run.Init()
 	return &run, nil
