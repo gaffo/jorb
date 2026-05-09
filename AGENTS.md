@@ -2,7 +2,7 @@
 
 ## Git hooks
 
-Hooks match CI (see `.github/workflows/go.yml`): `go build -v ./...` and `go test -v ./...`, plus a `commit-msg` check for the format below.
+Hooks match CI (see `.github/workflows/go.yml`): `go build -v ./...` and `go test -short -v ./...`, plus a `commit-msg` check for the format below. Run `go test ./...` (without `-short`) locally when you need tests that skip under short mode, such as the large JSON serializer perf case.
 
 Git runs `scripts/verify-go.sh` from `.githooks/` (same commands as CI). [Lefthook](https://github.com/evilmartians/lefthook) is configured in `lefthook.yml` if you want to run the same checks manually, for example `lefthook run pre-commit` after `go install github.com/evilmartians/lefthook@latest`.
 
