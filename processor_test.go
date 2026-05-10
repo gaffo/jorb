@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"runtime/pprof"
 	"testing"
 	"time"
@@ -18,23 +19,6 @@ import (
 )
 
 // import "github.com/stretchr/testify/assert"
-
-// JobContext represents my Job's context, eg the state of doing work
-type MyJobContext struct {
-	Name       string
-	Count      int
-	StringList []string
-	String     string
-}
-
-// MyOverallContext any non-job specific state that is important for the overall run
-type MyOverallContext struct {
-	Name string
-}
-
-// MyAppContext is all of my application processing, clients, etc reference for the job processors
-type MyAppContext struct {
-}
 
 const (
 	STATE_DONE     = "done"
@@ -861,18 +845,86 @@ func TestProcessor_DLQ(t *testing.T) {
 	t.Skip()
 }
 
+// TestProcessor_JsonSerializer_RestartPreservesRun exercises the real persistence path:
+// Processor completion → persistAfterCompletion → Serializer.JobUpdate on the live run,
+// then process exit without an explicit CheckpointSync so restart must recover via checkpoint + JSONL replay.
+func TestProcessor_JsonSerializer_RestartPreservesRun(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "run.json")
+
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{
+		SyncAppend: true,
+	})
+	require.NoError(t, err)
+
+	// Must use the Run returned by NewJsonSerializer — it is the same pointer the store snapshots.
+	r.AddJob(MyJobContext{Count: 0})
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				kicks := []KickRequest[MyJobContext]{
+					{C: MyJobContext{Name: "fan-a"}, State: STATE_MIDDLE},
+					{C: MyJobContext{Name: "fan-b"}, State: STATE_MIDDLE},
+				}
+				jc.Count = 7
+				return jc, STATE_DONE, kicks, nil
+			},
+			Concurrency: 1,
+		},
+		{
+			TriggerState: STATE_MIDDLE,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				jc.Count += 10
+				return jc, STATE_DONE, nil, nil
+			},
+			Concurrency: 2,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	ac := MyAppContext{}
+	p, err := NewProcessor(ac, states, ws, nil)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = p.Exec(ctx, r)
+	require.NoError(t, err)
+
+	require.Len(t, r.Jobs, 3)
+	for _, j := range r.Jobs {
+		require.Equal(t, STATE_DONE, j.State)
+	}
+	require.Equal(t, 7, r.Jobs["0"].C.Count)
+	require.Equal(t, 10, r.Jobs["0->0"].C.Count)
+	require.Equal(t, 10, r.Jobs["0->1"].C.Count)
+
+	mem := r
+	require.NoError(t, ws.Close())
+
+	ws2, r2, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{SyncAppend: true})
+	require.NoError(t, err)
+	defer ws2.Close()
+
+	require.True(t, mem.Equal(r2), "reopened run must match post-exec memory state (checkpoint + JSONL replay)")
+}
+
 func TestProcessor_Serialization(t *testing.T) {
 	t.Parallel()
 
-	tempFile, err := os.CreateTemp("", "state-*.json.tmp")
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{SyncAppend: true})
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
 
-	serialzer := NewJsonSerializer[MyOverallContext, MyJobContext](tempFile.Name())
-
-	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -886,7 +938,6 @@ func TestProcessor_Serialization(t *testing.T) {
 					return jc, STATE_DONE, nil, errors.New("errored again")
 				}
 
-				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
 				return jc, TRIGGER_STATE_NEW, nil, errors.New("errored")
@@ -901,7 +952,7 @@ func TestProcessor_Serialization(t *testing.T) {
 		},
 	}
 
-	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, ws, nil)
 	assert.NoError(t, err)
 
 	start := time.Now()
@@ -915,11 +966,14 @@ func TestProcessor_Serialization(t *testing.T) {
 		assert.Equal(t, map[string][]string{TRIGGER_STATE_NEW: {"errored", "errored again"}}, j.StateErrors)
 	}
 
-	// Now reload the job
-	actual, err := serialzer.Deserialize()
+	require.NoError(t, ws.Close())
+
+	ws2, actual, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{SyncAppend: true})
 	require.NoError(t, err)
-	assert.NotNil(t, r)
+	defer ws2.Close()
+
 	assert.Equal(t, len(r.Jobs), len(actual.Jobs))
+	assert.True(t, r.Equal(actual))
 }
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

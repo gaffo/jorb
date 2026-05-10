@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 
 	"github.com/gaffo/jorb"
@@ -30,21 +31,35 @@ func main() {
 		},
 	}
 
+	const statePath = "aimd.state.json"
+	ws, _, err := jorb.NewJsonSerializer[OverallContext, JobContext](statePath, jorb.JsonSerializerConfig{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ws.Close()
+
+	// Resume between process runs: reload the persisted run from disk.
+	run, err := ws.Deserialize()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Create processor
 	processor, err := jorb.NewProcessor(
 		AppContext{},
 		states,
-		&jorb.NilSerializer[OverallContext, JobContext]{},
+		ws,
 		&jorb.NilStatusListener{},
 	)
 	if err != nil {
 		panic(err)
 	}
 
-	// Create run with jobs
-	run := jorb.NewRun[OverallContext, JobContext]("example-run", OverallContext{})
-	for i := 0; i < 100; i++ {
-		run.AddJobWithState(JobContext{Value: i}, "process")
+	if len(run.Jobs) == 0 {
+		run.Name = "example-run"
+		for i := 0; i < 100; i++ {
+			run.AddJobWithState(JobContext{Value: i}, "process")
+		}
 	}
 
 	// Execute

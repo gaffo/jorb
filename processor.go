@@ -210,8 +210,6 @@ func (s stateStorage[AC, OC, JC]) getStatusCounts() []StatusCount {
 	return ret
 }
 
-// Serializer is an interface that defines how to serialize and deserialize job contexts.
-
 // Processor executes a job
 type Processor[AC any, OC any, JC any] struct {
 	appContext     AC
@@ -328,7 +326,7 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 				p.stateStorage.processJob(job)
 			}
 
-			if err := p.serializer.Serialize(*r); err != nil {
+			if err := p.persistAfterCompletion(r, completedJob); err != nil {
 				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
 			}
 
@@ -347,6 +345,26 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 
 func (p *Processor[AC, OC, JC]) updateStatus() {
 	p.statusListener.StatusUpdate(p.stateStorage.getStatusCounts())
+}
+
+// persistAfterCompletion appends one record per touched job; [JsonSerializer] schedules checkpoints internally after appends.
+func (p *Processor[AC, OC, JC]) persistAfterCompletion(r *Run[OC, JC], completed Return[JC]) error {
+	w := p.serializer
+	if err := w.JobUpdate(completed.Job); err != nil {
+		return err
+	}
+	for idx, kr := range completed.KickRequests {
+		kJob := Job[JC]{
+			Id:          fmt.Sprintf("%s->%d", completed.Job.Id, idx),
+			C:           kr.C,
+			State:       kr.State,
+			StateErrors: map[string][]string{},
+		}
+		if err := w.JobUpdate(kJob); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *Processor[AC, OC, JC]) shutdown() {
@@ -386,7 +404,7 @@ func (s *StateExec[AC, OC, JC]) Run() {
 				return
 			}
 
-			// Job is passed by value but StateErrors is a map: clone so we don't race Serialize reading r.Jobs.
+			// Job is passed by value but StateErrors is a map: clone so we don't race persistence reading r.Jobs.
 			j.StateErrors = cloneStateErrorsMap(j.StateErrors)
 
 			if s.state.RateLimit != nil {
