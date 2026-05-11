@@ -89,8 +89,7 @@ func newStateStorageFromStates[AC any, OC any, JC any](states []State[AC, OC, JC
 			State:    stateName,
 			Terminal: s.Terminal,
 		}
-		// This is by-design unbuffered
-		st.stateChan[stateName] = make(chan Job[JC])
+		st.stateChan[stateName] = make(chan Job[JC], s.Concurrency)
 	}
 
 	sort.Strings(st.sortedStateNames)
@@ -251,8 +250,7 @@ func (p *Processor[AC, OC, JC]) init() {
 		p.statusListener = &NilStatusListener{}
 	}
 
-	// This is by-design unbuffered
-	p.returnChan = make(chan Return[JC])
+	p.returnChan = make(chan Return[JC], 256)
 }
 
 // Exec this big work function, this does all the crunching
