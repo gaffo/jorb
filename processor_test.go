@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"sync"
 	"testing"
 	"time"
 
@@ -1228,6 +1229,155 @@ func TestProcessor_StandardRateLimiterStillWorks(t *testing.T) {
 
 	if r.Jobs["0"].State != "done" {
 		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	}
+}
+
+func TestProcessor_HighThroughputNoOpJobs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{
+		CheckpointInterval: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	defer ws.Close()
+
+	const jobCount = 10000
+	for i := 0; i < jobCount; i++ {
+		r.AddJob(MyJobContext{Count: i})
+	}
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, STATE_MIDDLE, nil, nil
+			},
+			Concurrency: 150,
+		},
+		{
+			TriggerState: STATE_MIDDLE,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, STATE_DONE, nil, nil
+			},
+			Concurrency: 150,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(MyAppContext{}, states, ws, nil)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err = p.Exec(ctx, r)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+
+	for _, j := range r.Jobs {
+		require.Equal(t, STATE_DONE, j.State)
+	}
+	require.Less(t, elapsed, 5*time.Second, "no-op jobs took too long: %v", elapsed)
+	t.Logf("processed %d jobs through 3 states in %v", jobCount, elapsed)
+}
+
+func TestProcessor_CheckpointNotTriggeredDuringProcessing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{
+		CheckpointInterval: 1 * time.Hour,
+	})
+	require.NoError(t, err)
+
+	var gate sync.Mutex
+	gate.Lock()
+
+	const jobCount = 50
+	for i := 0; i < jobCount; i++ {
+		r.AddJob(MyJobContext{Count: i})
+	}
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				gate.Lock()
+				gate.Unlock()
+				return jc, STATE_DONE, nil, nil
+			},
+			Concurrency: jobCount,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(MyAppContext{}, states, ws, nil)
+	require.NoError(t, err)
+
+	// Record checkpoint mtime after init (materializeCleanIncremental writes one)
+	initStat, err := os.Stat(statePath)
+	require.NoError(t, err)
+	initMtime := initStat.ModTime()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Exec(ctx, r)
+	}()
+
+	// Wait for all jobs to be executing (blocked on gate)
+	time.Sleep(100 * time.Millisecond)
+
+	// Checkpoint mtime should not have changed — timer is 1 hour, no kick from JobUpdate
+	afterStat, err := os.Stat(statePath)
+	require.NoError(t, err)
+	require.Equal(t, initMtime, afterStat.ModTime(), "checkpoint should not have been rewritten while jobs are in-flight with long CheckpointInterval")
+
+	// Release all jobs
+	gate.Unlock()
+
+	err = <-done
+	require.NoError(t, err)
+
+	for _, j := range r.Jobs {
+		require.Equal(t, STATE_DONE, j.State)
+	}
+
+	// Incremental file should exist before Close (jobs were appended)
+	incrementalPath := filepath.Join(dir, "state.incremental.jsonl")
+	_, err = os.Stat(incrementalPath)
+	require.NoError(t, err, "incremental JSONL should exist before Close")
+
+	// Close should write final checkpoint and clean up incremental files
+	require.NoError(t, ws.Close())
+
+	// Checkpoint should have been updated
+	finalStat, err := os.Stat(statePath)
+	require.NoError(t, err)
+	require.True(t, finalStat.ModTime().After(initMtime), "Close must write a final checkpoint")
+
+	// Sealed segments should be cleaned up
+	matches, _ := filepath.Glob(filepath.Join(dir, "state.incremental.sealed.*.jsonl"))
+	require.Empty(t, matches, "sealed segments should be removed after Close")
+
+	// Active incremental file may exist but should be empty (re-created by checkpoint)
+	info, err := os.Stat(incrementalPath)
+	if err == nil {
+		require.Equal(t, int64(0), info.Size(), "incremental JSONL should be empty after Close")
 	}
 }
 
