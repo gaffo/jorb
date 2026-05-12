@@ -305,32 +305,22 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 		case <-ctx.Done():
 			return
 		case completedJob := <-p.returnChan:
-			// If the prior state of the completed job was at capacity, we now have space for one more
-			p.stateStorage.runNextWaitingJob(completedJob.PriorState)
+			needsStatusUpdate := p.handleReturn(r, completedJob)
 
-			// Update the run with the new state
-			r.UpdateJob(completedJob.Job)
-			p.stateStorage.processJob(completedJob.Job)
-
-			// Start any of the new jobs that need kicking
-			for idx, kickRequest := range completedJob.KickRequests {
-				job := Job[JC]{
-					Id:          fmt.Sprintf("%s->%d", completedJob.Job.Id, idx),
-					C:           kickRequest.C,
-					State:       kickRequest.State,
-					StateErrors: map[string][]string{},
+			// Drain buffered completions without blocking
+		drain:
+			for {
+				select {
+				case extra := <-p.returnChan:
+					if p.handleReturn(r, extra) {
+						needsStatusUpdate = true
+					}
+				default:
+					break drain
 				}
-				r.UpdateJob(job)
-				p.stateStorage.processJob(job)
 			}
 
-			if err := p.persistAfterCompletion(r, completedJob); err != nil {
-				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
-			}
-
-			// If we move a job back to the same state and there are no kick requests, no need to see a status
-			// update as the totals will be the same
-			if completedJob.PriorState != completedJob.Job.State || len(completedJob.KickRequests) > 0 {
+			if needsStatusUpdate {
 				p.updateStatus()
 			}
 
@@ -339,6 +329,30 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 			}
 		}
 	}
+}
+
+func (p *Processor[AC, OC, JC]) handleReturn(r *Run[OC, JC], completedJob Return[JC]) bool {
+	p.stateStorage.runNextWaitingJob(completedJob.PriorState)
+
+	r.UpdateJob(completedJob.Job)
+	p.stateStorage.processJob(completedJob.Job)
+
+	for idx, kickRequest := range completedJob.KickRequests {
+		job := Job[JC]{
+			Id:          fmt.Sprintf("%s->%d", completedJob.Job.Id, idx),
+			C:           kickRequest.C,
+			State:       kickRequest.State,
+			StateErrors: map[string][]string{},
+		}
+		r.UpdateJob(job)
+		p.stateStorage.processJob(job)
+	}
+
+	if err := p.persistAfterCompletion(r, completedJob); err != nil {
+		log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
+	}
+
+	return completedJob.PriorState != completedJob.Job.State || len(completedJob.KickRequests) > 0
 }
 
 func (p *Processor[AC, OC, JC]) updateStatus() {

@@ -382,7 +382,9 @@ func (w *JsonSerializer[OC, JC]) JobUpdate(job Job[JC]) error {
 		}
 	}
 	w.appendMu.Unlock()
-	w.scheduleCheckpoint()
+	if w.ticker == nil {
+		w.scheduleCheckpoint()
+	}
 	return nil
 }
 
