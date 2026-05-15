@@ -44,7 +44,7 @@
 //   - Incremental appends continue during backoff (no data loss)
 //   - Recovery relies on replaying accumulated JSONL segments
 //
-// # Performance Characteristics (see examples/serializerbench)
+// # Performance Characteristics
 //
 // Per-write samples on a typical Linux worker:
 //   - Incremental JSONL append with fsync: ~1-3ms average, low single-digit ms P90
@@ -64,7 +64,7 @@
 //
 // # Why This Approach
 //
-// Measured via examples/serializerbench comparing alternatives:
+// Measured alternatives comparing performance characteristics:
 //   - Incremental JSONL lines ([JsonSerializer.JobUpdate]) stay ~1-3ms avg with fsync
 //   - Rewriting entire run to JSON on every completion scales with total run size,
 //     reaching tens to hundreds of milliseconds per write on large runs
