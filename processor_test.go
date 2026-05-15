@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -903,9 +904,22 @@ func TestProcessor_JsonSerializer_RestartPreservesRun(t *testing.T) {
 	for _, j := range r.Jobs {
 		require.Equal(t, STATE_DONE, j.State)
 	}
-	require.Equal(t, 7, r.Jobs["0"].C.Count)
-	require.Equal(t, 10, r.Jobs["0->0"].C.Count)
-	require.Equal(t, 10, r.Jobs["0->1"].C.Count)
+	
+	// Find the original job and kicked jobs by checking for "->" in the ID
+	var originalJob Job[MyJobContext]
+	var kickJobs []Job[MyJobContext]
+	for _, j := range r.Jobs {
+		if !strings.Contains(j.Id, "->") {
+			originalJob = j
+		} else {
+			kickJobs = append(kickJobs, j)
+		}
+	}
+	require.Equal(t, 7, originalJob.C.Count)
+	require.Len(t, kickJobs, 2)
+	for _, k := range kickJobs {
+		require.Equal(t, 10, k.C.Count)
+	}
 
 	mem := r
 	require.NoError(t, ws.Close())
@@ -1118,13 +1132,19 @@ func TestProcessor_AIMDBackoff(t *testing.T) {
 	}
 
 	// Verify job completed
-	if r.Jobs["0"].State != "done" {
-		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	require.Len(t, r.Jobs, 1)
+	var job Job[JC]
+	for _, j := range r.Jobs {
+		job = j
+		break
+	}
+	if job.State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", job.State)
 	}
 
 	// Verify errors were logged
-	if len(r.Jobs["0"].StateErrors["new"]) != 3 {
-		t.Errorf("Expected 3 errors logged for 'new' state, got %d", len(r.Jobs["0"].StateErrors["new"]))
+	if len(job.StateErrors["new"]) != 3 {
+		t.Errorf("Expected 3 errors logged for 'new' state, got %d", len(job.StateErrors["new"]))
 	}
 }
 
@@ -1227,8 +1247,14 @@ func TestProcessor_StandardRateLimiterStillWorks(t *testing.T) {
 		t.Fatalf("Exec failed: %v", err)
 	}
 
-	if r.Jobs["0"].State != "done" {
-		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	require.Len(t, r.Jobs, 1)
+	var job Job[JC]
+	for _, j := range r.Jobs {
+		job = j
+		break
+	}
+	if job.State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", job.State)
 	}
 }
 
@@ -1414,7 +1440,13 @@ func TestProcessor_NoRateLimiterStillWorks(t *testing.T) {
 		t.Fatalf("Exec failed: %v", err)
 	}
 
-	if r.Jobs["0"].State != "done" {
-		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	require.Len(t, r.Jobs, 1)
+	var job Job[JC]
+	for _, j := range r.Jobs {
+		job = j
+		break
+	}
+	if job.State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", job.State)
 	}
 }

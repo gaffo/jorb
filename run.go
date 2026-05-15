@@ -1,6 +1,7 @@
 package jorb
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -33,6 +34,17 @@ func NewRun[OC any, JC any](name string, oc OC) *Run[OC, JC] {
 	return r
 }
 
+// generateJobID generates a short UUID-like identifier (8 chars hex).
+// Uses crypto/rand for randomness to avoid collisions.
+func generateJobID() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+	}
+	return fmt.Sprintf("%08x", uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8|uint32(b[3]))
+}
+
 func (r *Run[OC, JC]) Init() {
 	r.m.Lock()
 	defer r.m.Unlock()
@@ -56,8 +68,15 @@ func (r *Run[OC, JC]) AddJobWithState(jc JC, state string) {
 	r.m.Lock()
 	defer r.m.Unlock()
 
-	// TODO: Use a uuid for the jobs
-	id := fmt.Sprintf("%d", len(r.Jobs))
+	id := generateJobID()
+	// Ensure uniqueness (extremely unlikely to collide, but handle it)
+	for {
+		if _, exists := r.Jobs[id]; !exists {
+			break
+		}
+		id = generateJobID()
+	}
+	
 	j := Job[JC]{
 		Id:          id,
 		C:           jc,

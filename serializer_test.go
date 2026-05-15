@@ -45,7 +45,15 @@ func TestJsonSerializer_CheckpointWithJobErrors(t *testing.T) {
 
 	want := NewRun[MyOverallContext, MyJobContext]("default", MyOverallContext{Name: "overall"})
 	want.AddJob(MyJobContext{Count: 0, Name: "job-0"})
-	j := want.Jobs["0"]
+	
+	// Get the job ID (now a UUID)
+	var jobID string
+	for id := range want.Jobs {
+		jobID = id
+		break
+	}
+	
+	j := want.Jobs[jobID]
 	j.StateErrors = map[string][]string{"key": {"e1", "e2"}}
 	want.UpdateJob(j)
 
@@ -54,7 +62,7 @@ func TestJsonSerializer_CheckpointWithJobErrors(t *testing.T) {
 	require.NoError(t, err)
 	defer ws.Close()
 
-	run.UpdateJob(want.Jobs["0"])
+	run.UpdateJob(want.Jobs[jobID])
 	require.NoError(t, ws.CheckpointSync())
 
 	actualRun, err := ws.Deserialize()
