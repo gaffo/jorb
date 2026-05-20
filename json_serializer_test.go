@@ -17,7 +17,7 @@ func TestNewJsonSerializer_FreshDir(t *testing.T) {
 	dir := t.TempDir()
 	cp := filepath.Join(dir, "state.json")
 
-	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws.Close()
 
@@ -30,7 +30,7 @@ func TestJsonSerializer_ReplayOnRestart(t *testing.T) {
 	dir := t.TempDir()
 	cp := filepath.Join(dir, "state.json")
 
-	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 
 	j := Job[MyJobContext]{
@@ -43,7 +43,7 @@ func TestJsonSerializer_ReplayOnRestart(t *testing.T) {
 	require.NoError(t, ws.JobUpdate(j))
 	require.NoError(t, ws.Close())
 
-	ws2, run2, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws2, run2, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws2.Close()
 
@@ -57,7 +57,7 @@ func TestJsonSerializer_CheckpointSyncClearsIncrementalArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	cp := filepath.Join(dir, "state.json")
 
-	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws.Close()
 
@@ -90,7 +90,7 @@ func TestJsonSerializer_CloseFinalCheckpointClearsSealedSegments(t *testing.T) {
 	dir := t.TempDir()
 	cp := filepath.Join(dir, "state.json")
 
-	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 
 	j := Job[MyJobContext]{Id: "0", State: "done", C: MyJobContext{Name: "flush"}, StateErrors: map[string][]string{}}
@@ -102,7 +102,7 @@ func TestJsonSerializer_CloseFinalCheckpointClearsSealedSegments(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, sealed, "Close should finalize checkpoint and remove sealed JSONL segments")
 
-	ws2, run2, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws2, run2, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws2.Close()
 	got := run2.Jobs["0"]
@@ -122,7 +122,7 @@ func TestJsonSerializer_JobUpdateMeanLatencyBudget(t *testing.T) {
 
 	dir := t.TempDir()
 	cp := filepath.Join(dir, "state.json")
-	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{SyncAppend: true})
+	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws.Close()
 
@@ -160,9 +160,7 @@ func TestJsonSerializer_AsyncCheckpointCoalesces(t *testing.T) {
 	dir := t.TempDir()
 	cp := filepath.Join(dir, "state.json")
 
-	ws, _, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{
-		CheckpointInterval: 50 * time.Millisecond,
-	})
+	ws, _, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws.Close()
 

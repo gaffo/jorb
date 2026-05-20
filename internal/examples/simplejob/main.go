@@ -53,7 +53,7 @@ func main() {
 	}
 
 	statePath := "example.state.json"
-	ws, _, err := jorb.NewJsonSerializer[oc, jc](statePath, jorb.JsonSerializerConfig{})
+	ws, _, err := jorb.NewJsonSerializer[oc, jc](statePath)
 	if err != nil {
 		log.Fatal(err)
 	}
