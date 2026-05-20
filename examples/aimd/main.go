@@ -32,7 +32,7 @@ func main() {
 	}
 
 	const statePath = "aimd.state.json"
-	ws, _, err := jorb.NewJsonSerializer[OverallContext, JobContext](statePath, jorb.JsonSerializerConfig{})
+	ws, _, err := jorb.NewJsonSerializer[OverallContext, JobContext](statePath)
 	if err != nil {
 		log.Fatal(err)
 	}

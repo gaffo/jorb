@@ -20,7 +20,7 @@ func TestJsonSerializer_CheckpointRoundTrip(t *testing.T) {
 
 	dir := t.TempDir()
 	cp := filepath.Join(dir, "state.json")
-	ws, diskRun, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws, diskRun, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 
 	for _, j := range run.Jobs {
@@ -29,7 +29,7 @@ func TestJsonSerializer_CheckpointRoundTrip(t *testing.T) {
 	require.NoError(t, ws.CheckpointSync())
 	require.NoError(t, ws.Close())
 
-	ws2, restored, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws2, restored, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws2.Close()
 
@@ -58,7 +58,7 @@ func TestJsonSerializer_CheckpointWithJobErrors(t *testing.T) {
 	want.UpdateJob(j)
 
 	cp := filepath.Join(tempDir, "state.json")
-	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp, JsonSerializerConfig{})
+	ws, run, err := NewJsonSerializer[MyOverallContext, MyJobContext](cp)
 	require.NoError(t, err)
 	defer ws.Close()
 

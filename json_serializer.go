@@ -10,9 +10,8 @@
 //
 // # Write Path (JobUpdate)
 //
-// Each JobUpdate appends a single JSONL line to the active .incremental.jsonl file.
-// Optional fsync (JsonSerializerConfig.SyncAppend) ensures durability at ~1-3ms per write.
-// Without fsync, writes complete in ~10-100µs but rely on OS buffering.
+// Each JobUpdate appends a single JSONL line to the active .incremental.jsonl file
+// and fsyncs it for durability.
 //
 // # Checkpoint Path (Background)
 //
@@ -21,9 +20,9 @@
 //   - Per-append kick (CheckpointInterval == 0, coalesced when busy)
 //
 // Checkpoint algorithm (atomic 3-phase):
-//   1. Rotate: Close active .incremental.jsonl → sealed .incremental.sealed.NNNNNN.jsonl
-//   2. Snapshot: Lock Run.m, copy Jobs map, write full state to .json.tmp
-//   3. Publish: Rename .json.tmp → .json, delete all sealed segments
+//  1. Rotate: Close active .incremental.jsonl → sealed .incremental.sealed.NNNNNN.jsonl
+//  2. Snapshot: Lock Run.m, copy Jobs map, write full state to .json.tmp
+//  3. Publish: Rename .json.tmp → .json, delete all sealed segments
 //
 // The atomic rename ensures checkpoint files are never partially written.
 // On restart, recoverCheckpointAtomic handles recovery from .tmp or .old files if needed.
@@ -31,11 +30,11 @@
 // # Recovery Path (NewJsonSerializer)
 //
 // On startup:
-//   1. Recover checkpoint from .tmp/.old if .json is missing (crash recovery)
-//   2. Load main checkpoint .json (if exists)
-//   3. Replay sealed .incremental.sealed.*.jsonl in order
-//   4. Replay active .incremental.jsonl
-//   5. Write clean checkpoint, delete all segments (materializeCleanIncremental)
+//  1. Recover checkpoint from .tmp/.old if .json is missing (crash recovery)
+//  2. Load main checkpoint .json (if exists)
+//  3. Replay sealed .incremental.sealed.*.jsonl in order
+//  4. Replay active .incremental.jsonl
+//  5. Write clean checkpoint, delete all segments (materializeCleanIncremental)
 //
 // # Checkpoint Failure Handling
 //
@@ -91,7 +90,7 @@ import (
 
 const jsonlRecordVersion = 1
 
-// JsonSerializerConfig configures JSONL append plus asynchronous checkpoint behavior.
+// jsonSerializerConfig configures JSONL append plus asynchronous checkpoint behavior.
 //
 // # Checkpoint Strategy
 //
@@ -100,39 +99,22 @@ const jsonlRecordVersion = 1
 //   - Cold path: Periodic full checkpoint snapshots to the main .json file
 //
 // CheckpointInterval controls when full checkpoints occur. There are two checkpoint triggers:
-//   1. Time-based (CheckpointInterval > 0): Runs checkpoint on a timer
-//   2. Per-append (CheckpointInterval == 0): Schedules checkpoint after each JobUpdate (coalesced)
-//
-// # Performance vs Safety Tradeoffs
-//
-// SyncAppend controls fsync behavior after each JSONL append:
-//   - true: Each JobUpdate calls fsync (~1-3ms per write, survives power loss)
-//   - false: OS buffering only (~10-100µs per write, may lose recent appends on crash)
+//  1. Time-based (CheckpointInterval > 0): Runs checkpoint on a timer
+//  2. Per-append (CheckpointInterval == 0): Schedules checkpoint after each JobUpdate (coalesced)
 //
 // MaxReplayLineBytes caps individual JSONL line size during replay (default 256MB).
 // Increase if you have very large job contexts; decrease to limit memory on constrained systems.
 //
-// # Typical Configurations
-//
-// For safety-critical workflows (e.g., financial transactions):
-//   JsonSerializerConfig{SyncAppend: true, CheckpointInterval: 5 * time.Minute}
-//
-// For high-throughput batch jobs (can tolerate replay):
-//   JsonSerializerConfig{SyncAppend: false, CheckpointInterval: 10 * time.Second}
-//
 // For development/testing (no persistence needed):
-//   Use NilSerializer instead
-type JsonSerializerConfig struct {
+//
+//	Use NilSerializer instead
+type jsonSerializerConfig struct {
 	// CheckpointInterval runs a full checkpoint on this interval when > 0.
 	// When 0, checkpoints are scheduled after each JobUpdate (coalesced if multiple updates occur rapidly).
 	// Checkpoints merge all incremental JSONL files into the main checkpoint file.
 	CheckpointInterval time.Duration
-	
-	// SyncAppend fsyncs the append file after each JobUpdate.
-	// true: Durable but slower (~1-3ms per write). Survives process and power failures.
-	// false: Fast but relies on OS buffering (~10-100µs per write). May lose recent updates on power loss.
-	SyncAppend bool
-	
+
+
 	// MaxReplayLineBytes caps individual JSONL line size during replay (default 256MB if zero).
 	// Increase for large job contexts; decrease to limit memory usage on constrained systems.
 	MaxReplayLineBytes int
@@ -146,7 +128,7 @@ type JsonSerializer[OC, JC any] struct {
 	stem           string
 	appendPath     string
 
-	cfg JsonSerializerConfig
+	cfg jsonSerializerConfig
 
 	run *Run[OC, JC]
 
@@ -157,8 +139,8 @@ type JsonSerializer[OC, JC any] struct {
 	ckMu              sync.Mutex
 	checkpointBusy    bool
 	checkpointPending bool
-	ckFailures        int           // consecutive checkpoint failures for backoff
-	ckBackoffUntil    time.Time     // skip checkpoints until this time
+	ckFailures        int       // consecutive checkpoint failures for backoff
+	ckBackoffUntil    time.Time // skip checkpoints until this time
 
 	stop chan struct{}
 	done chan struct{}
@@ -187,7 +169,7 @@ func sealedIncrementalPath(dir, stem string, seq uint64) string {
 }
 
 // NewJsonSerializer loads checkpoint + replays JSONL segments, returns the store and the restored Run.
-func NewJsonSerializer[OC, JC any](checkpointPath string, cfg JsonSerializerConfig) (*JsonSerializer[OC, JC], *Run[OC, JC], error) {
+func NewJsonSerializer[OC, JC any](checkpointPath string) (*JsonSerializer[OC, JC], *Run[OC, JC], error) {
 	dir, stem, appendPath := incrementalStemPaths(checkpointPath)
 	if err := os.MkdirAll(dir, 0600); err != nil {
 		return nil, nil, err
@@ -198,11 +180,13 @@ func NewJsonSerializer[OC, JC any](checkpointPath string, cfg JsonSerializerConf
 		dir:            dir,
 		stem:           stem,
 		appendPath:     appendPath,
-		cfg:            cfg,
-		sealSeq:        0,
-		stop:           make(chan struct{}),
-		done:           make(chan struct{}),
-		kick:           make(chan struct{}, 1),
+		cfg: jsonSerializerConfig{
+			CheckpointInterval: time.Second * 10,
+		},
+		sealSeq: 0,
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+		kick:    make(chan struct{}, 1),
 	}
 
 	if err := recoverCheckpointAtomic(checkpointPath); err != nil {
@@ -222,8 +206,8 @@ func NewJsonSerializer[OC, JC any](checkpointPath string, cfg JsonSerializerConf
 		return nil, nil, err
 	}
 
-	if cfg.CheckpointInterval > 0 {
-		w.ticker = time.NewTicker(cfg.CheckpointInterval)
+	if w.cfg.CheckpointInterval > 0 {
+		w.ticker = time.NewTicker(w.cfg.CheckpointInterval)
 	}
 	go w.checkpointLoop()
 
@@ -238,10 +222,10 @@ func NewJsonSerializer[OC, JC any](checkpointPath string, cfg JsonSerializerConf
 //   - checkpoint.json.old: Previous checkpoint (backup during rename, cleaned after)
 //
 // Recovery logic:
-//   1. If .json exists → Normal case, clean up any orphaned .tmp/.old
-//   2. If .json missing + .tmp exists → Crash during rename, promote .tmp to .json
-//   3. If .json missing + .old exists → Crash before cleanup, restore .old to .json
-//   4. If none exist → Fresh start (NewJsonSerializer will initialize empty Run)
+//  1. If .json exists → Normal case, clean up any orphaned .tmp/.old
+//  2. If .json missing + .tmp exists → Crash during rename, promote .tmp to .json
+//  3. If .json missing + .old exists → Crash before cleanup, restore .old to .json
+//  4. If none exist → Fresh start (NewJsonSerializer will initialize empty Run)
 //
 // This ensures we never lose a checkpoint: either the new one completed (.json),
 // or we can recover from in-progress (.tmp) or previous (.old) state.
@@ -478,11 +462,9 @@ func (w *JsonSerializer[OC, JC]) JobUpdate(job Job[JC]) error {
 		w.appendMu.Unlock()
 		return err
 	}
-	if w.cfg.SyncAppend {
-		if err := w.appendFile.Sync(); err != nil {
-			w.appendMu.Unlock()
-			return err
-		}
+	if err := w.appendFile.Sync(); err != nil {
+		w.appendMu.Unlock()
+		return err
 	}
 	w.appendMu.Unlock()
 	if w.ticker == nil {
@@ -583,13 +565,16 @@ func (w *JsonSerializer[OC, JC]) CheckpointSync() error {
 // doCheckpointRotateWriteDelete executes the 3-phase atomic checkpoint protocol:
 //
 // Phase 1 - Rotate: Close active .incremental.jsonl and rename to sealed segment
-//   This freezes the current append log so new writes go to a fresh file
+//
+//	This freezes the current append log so new writes go to a fresh file
 //
 // Phase 2 - Snapshot: Lock Run, copy Jobs map, write full state to .json.tmp
-//   Snapshot runs under Run.m lock but releases before fsync to avoid blocking
+//
+//	Snapshot runs under Run.m lock but releases before fsync to avoid blocking
 //
 // Phase 3 - Publish: Atomic rename .json.tmp → .json, then delete sealed segments
-//   The rename makes the checkpoint visible atomically; cleanup is safe after
+//
+//	The rename makes the checkpoint visible atomically; cleanup is safe after
 //
 // The entire operation holds appendMu to prevent JobUpdate from seeing nil appendFile
 // between rotate and reopen. This eliminates "json serializer closed" races.
