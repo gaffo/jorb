@@ -73,7 +73,7 @@ The rate limiter automatically:
 
 # Concepts
 
-When making a program you basically need the following: AC, OC, JC, Job, Run, States, StatusListener, Serializer, and a Processor
+When making a program you basically need the following: AC, OC, JC, Job, Run, States, StatusListener, persistence (`JsonSerializer` or `NilSerializer`), and a Processor
 
 ## AC: Application Context
 This is a struct where you can pass job specific application context to the jobs as they execute state transitions.
@@ -144,15 +144,13 @@ You can use a nil one but I hook this up to a hash of progress bars per state to
 
 You have to have one cause I'm too lazy to deal with nil.
 
-# Serializer
-I reallly recommend you use one, there's a JsonSerializer provided, just new it up. This lets you very easily kill and restart processing of the workflow 
-constantly or at any time. It also lets you re-hydrate old workflows and report on them.
+# Persistence (JsonSerializer)
+Use `NewJsonSerializer` with a checkpoint file path and `JsonSerializerConfig{}`, pass the returned `*JsonSerializer` and `*Run` into `NewProcessor`, and call `Close()` on shutdown so the final checkpoint is written and incremental JSONL files are merged away. That gives incremental JSONL appends on each completion plus periodic full checkpoints.
 
-If you really don't want to use one then there's a NilSerializer you can use. 
+If you do not need disk persistence, use `NilSerializer` as the persistence argument (no-op append/checkpoint).
 
 # Processor
-This does all the work, new one up with a app context and set of states and then exec a run with it. It'll block until it finishes calling to the ExecFunctions, Serializer, and 
-StatusListener as needed.
+This does all the work: construct it with an app context and states, then `Exec` a run. It blocks until processing finishes, invoking exec functions, JSON persistence, and the status listener as needed.
 
 # Other Notes
 This is super alpha software. I am point releasing it every breaking change at the v0.0.x level. 

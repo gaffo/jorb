@@ -18,14 +18,8 @@ type ac struct{}
 type jc struct{}
 
 func main() {
-	o := oc{}
 	a := ac{}
-	r := jorb.NewRun[oc, jc]("example", o)
-
 	slog.SetLogLoggerLevel(slog.LevelWarn)
-	for i := 0; i < 100; i++ {
-		r.AddJobWithState(jc{}, "A")
-	}
 
 	states := []jorb.State[ac, oc, jc]{
 		{
@@ -58,14 +52,32 @@ func main() {
 		},
 	}
 
-	serial := jorb.NewJsonSerializer[oc, jc]("example.state")
-	listener := &fileListener{fileName: "example.status"}
-	p, err := jorb.NewProcessor[ac, oc, jc](a, states, serial, listener)
+	statePath := "example.state.json"
+	ws, _, err := jorb.NewJsonSerializer[oc, jc](statePath, jorb.JsonSerializerConfig{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ws.Close()
+
+	// Resume between process runs: reload the persisted run from checkpoint + JSONL.
+	run, err := ws.Deserialize()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if err := p.Exec(context.Background(), r); err != nil {
+	listener := &fileListener{fileName: "example.status"}
+	p, err := jorb.NewProcessor[ac, oc, jc](a, states, ws, listener)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if len(run.Jobs) == 0 {
+		for i := 0; i < 100; i++ {
+			run.AddJobWithState(jc{}, "A")
+		}
+	}
+
+	if err := p.Exec(context.Background(), run); err != nil {
 		log.Fatal(err)
 	}
 }

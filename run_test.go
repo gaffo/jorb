@@ -12,12 +12,21 @@ func Test_AddJobWithState(t *testing.T) {
 	r := NewRun[MyOverallContext, MyJobContext]("job", MyOverallContext{})
 	r.AddJobWithState(MyJobContext{Count: 0}, "other_state")
 	assert.Equal(t, 1, len(r.Jobs))
-	assert.Equal(t, "other_state", r.Jobs["0"].State)
-	originalTime := r.Jobs["0"].LastUpdate
+	
+	// Get the job ID (now a UUID)
+	var jobID string
+	var originalTime *time.Time
+	for id, j := range r.Jobs {
+		jobID = id
+		assert.Equal(t, "other_state", j.State)
+		originalTime = j.LastUpdate
+		break
+	}
+	
 	time.Sleep(1 * time.Second)
 
 	r.UpdateJob(Job[MyJobContext]{
-		Id: "0",
+		Id: jobID,
 		C: MyJobContext{
 			Count: 1,
 		},
@@ -28,7 +37,7 @@ func Test_AddJobWithState(t *testing.T) {
 	// Number of jobs has not changed
 	assert.Equal(t, 1, len(r.Jobs))
 	// Job's state has been updated
-	assert.Equal(t, "other_state_2", r.Jobs["0"].State)
+	assert.Equal(t, "other_state_2", r.Jobs[jobID].State)
 	// Job's time has been updated
-	assert.NotEqual(t, originalTime, r.Jobs["0"].LastUpdate)
+	assert.NotEqual(t, originalTime, r.Jobs[jobID].LastUpdate)
 }

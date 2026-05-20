@@ -8,7 +8,10 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"runtime/pprof"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,23 +21,6 @@ import (
 )
 
 // import "github.com/stretchr/testify/assert"
-
-// JobContext represents my Job's context, eg the state of doing work
-type MyJobContext struct {
-	Name       string
-	Count      int
-	StringList []string
-	String     string
-}
-
-// MyOverallContext any non-job specific state that is important for the overall run
-type MyOverallContext struct {
-	Name string
-}
-
-// MyAppContext is all of my application processing, clients, etc reference for the job processors
-type MyAppContext struct {
-}
 
 const (
 	STATE_DONE     = "done"
@@ -861,18 +847,99 @@ func TestProcessor_DLQ(t *testing.T) {
 	t.Skip()
 }
 
+// TestProcessor_JsonSerializer_RestartPreservesRun exercises the real persistence path:
+// Processor completion → persistAfterCompletion → Serializer.JobUpdate on the live run,
+// then process exit without an explicit CheckpointSync so restart must recover via checkpoint + JSONL replay.
+func TestProcessor_JsonSerializer_RestartPreservesRun(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "run.json")
+
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{
+		SyncAppend: true,
+	})
+	require.NoError(t, err)
+
+	// Must use the Run returned by NewJsonSerializer — it is the same pointer the store snapshots.
+	r.AddJob(MyJobContext{Count: 0})
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				kicks := []KickRequest[MyJobContext]{
+					{C: MyJobContext{Name: "fan-a"}, State: STATE_MIDDLE},
+					{C: MyJobContext{Name: "fan-b"}, State: STATE_MIDDLE},
+				}
+				jc.Count = 7
+				return jc, STATE_DONE, kicks, nil
+			},
+			Concurrency: 1,
+		},
+		{
+			TriggerState: STATE_MIDDLE,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				jc.Count += 10
+				return jc, STATE_DONE, nil, nil
+			},
+			Concurrency: 2,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	ac := MyAppContext{}
+	p, err := NewProcessor(ac, states, ws, nil)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = p.Exec(ctx, r)
+	require.NoError(t, err)
+
+	require.Len(t, r.Jobs, 3)
+	for _, j := range r.Jobs {
+		require.Equal(t, STATE_DONE, j.State)
+	}
+	
+	// Find the original job and kicked jobs by checking for "->" in the ID
+	var originalJob Job[MyJobContext]
+	var kickJobs []Job[MyJobContext]
+	for _, j := range r.Jobs {
+		if !strings.Contains(j.Id, "->") {
+			originalJob = j
+		} else {
+			kickJobs = append(kickJobs, j)
+		}
+	}
+	require.Equal(t, 7, originalJob.C.Count)
+	require.Len(t, kickJobs, 2)
+	for _, k := range kickJobs {
+		require.Equal(t, 10, k.C.Count)
+	}
+
+	mem := r
+	require.NoError(t, ws.Close())
+
+	ws2, r2, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{SyncAppend: true})
+	require.NoError(t, err)
+	defer ws2.Close()
+
+	require.True(t, mem.Equal(r2), "reopened run must match post-exec memory state (checkpoint + JSONL replay)")
+}
+
 func TestProcessor_Serialization(t *testing.T) {
 	t.Parallel()
 
-	tempFile, err := os.CreateTemp("", "state-*.json.tmp")
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{SyncAppend: true})
 	require.NoError(t, err)
-	defer os.Remove(tempFile.Name())
 
-	serialzer := NewJsonSerializer[MyOverallContext, MyJobContext](tempFile.Name())
-
-	oc := MyOverallContext{}
 	ac := MyAppContext{}
-	r := NewRun[MyOverallContext, MyJobContext]("job", oc)
 	for i := 0; i < 10; i++ {
 		r.AddJob(MyJobContext{
 			Count: 0,
@@ -886,7 +953,6 @@ func TestProcessor_Serialization(t *testing.T) {
 					return jc, STATE_DONE, nil, errors.New("errored again")
 				}
 
-				//log.Println("Processing New")
 				jc.Count += 1
 				time.Sleep(time.Second)
 				return jc, TRIGGER_STATE_NEW, nil, errors.New("errored")
@@ -901,7 +967,7 @@ func TestProcessor_Serialization(t *testing.T) {
 		},
 	}
 
-	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, serialzer, nil)
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](ac, states, ws, nil)
 	assert.NoError(t, err)
 
 	start := time.Now()
@@ -915,11 +981,14 @@ func TestProcessor_Serialization(t *testing.T) {
 		assert.Equal(t, map[string][]string{TRIGGER_STATE_NEW: {"errored", "errored again"}}, j.StateErrors)
 	}
 
-	// Now reload the job
-	actual, err := serialzer.Deserialize()
+	require.NoError(t, ws.Close())
+
+	ws2, actual, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{SyncAppend: true})
 	require.NoError(t, err)
-	assert.NotNil(t, r)
+	defer ws2.Close()
+
 	assert.Equal(t, len(r.Jobs), len(actual.Jobs))
+	assert.True(t, r.Equal(actual))
 }
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -1063,13 +1132,19 @@ func TestProcessor_AIMDBackoff(t *testing.T) {
 	}
 
 	// Verify job completed
-	if r.Jobs["0"].State != "done" {
-		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	require.Len(t, r.Jobs, 1)
+	var job Job[JC]
+	for _, j := range r.Jobs {
+		job = j
+		break
+	}
+	if job.State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", job.State)
 	}
 
 	// Verify errors were logged
-	if len(r.Jobs["0"].StateErrors["new"]) != 3 {
-		t.Errorf("Expected 3 errors logged for 'new' state, got %d", len(r.Jobs["0"].StateErrors["new"]))
+	if len(job.StateErrors["new"]) != 3 {
+		t.Errorf("Expected 3 errors logged for 'new' state, got %d", len(job.StateErrors["new"]))
 	}
 }
 
@@ -1172,8 +1247,163 @@ func TestProcessor_StandardRateLimiterStillWorks(t *testing.T) {
 		t.Fatalf("Exec failed: %v", err)
 	}
 
-	if r.Jobs["0"].State != "done" {
-		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	require.Len(t, r.Jobs, 1)
+	var job Job[JC]
+	for _, j := range r.Jobs {
+		job = j
+		break
+	}
+	if job.State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", job.State)
+	}
+}
+
+func TestProcessor_HighThroughputNoOpJobs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{
+		CheckpointInterval: 10 * time.Second,
+	})
+	require.NoError(t, err)
+	defer ws.Close()
+
+	const jobCount = 10000
+	for i := 0; i < jobCount; i++ {
+		r.AddJob(MyJobContext{Count: i})
+	}
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, STATE_MIDDLE, nil, nil
+			},
+			Concurrency: 150,
+		},
+		{
+			TriggerState: STATE_MIDDLE,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				return jc, STATE_DONE, nil, nil
+			},
+			Concurrency: 150,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(MyAppContext{}, states, ws, nil)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err = p.Exec(ctx, r)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+
+	for _, j := range r.Jobs {
+		require.Equal(t, STATE_DONE, j.State)
+	}
+	require.Less(t, elapsed, 5*time.Second, "no-op jobs took too long: %v", elapsed)
+	t.Logf("processed %d jobs through 3 states in %v", jobCount, elapsed)
+}
+
+func TestProcessor_CheckpointNotTriggeredDuringProcessing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	ws, r, err := NewJsonSerializer[MyOverallContext, MyJobContext](statePath, JsonSerializerConfig{
+		CheckpointInterval: 1 * time.Hour,
+	})
+	require.NoError(t, err)
+
+	var gate sync.Mutex
+	gate.Lock()
+
+	const jobCount = 50
+	for i := 0; i < jobCount; i++ {
+		r.AddJob(MyJobContext{Count: i})
+	}
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec: func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+				gate.Lock()
+				gate.Unlock()
+				return jc, STATE_DONE, nil, nil
+			},
+			Concurrency: jobCount,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+	}
+
+	p, err := NewProcessor(MyAppContext{}, states, ws, nil)
+	require.NoError(t, err)
+
+	// Record checkpoint mtime after init (materializeCleanIncremental writes one)
+	initStat, err := os.Stat(statePath)
+	require.NoError(t, err)
+	initMtime := initStat.ModTime()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Exec(ctx, r)
+	}()
+
+	// Wait for all jobs to be executing (blocked on gate)
+	time.Sleep(100 * time.Millisecond)
+
+	// Checkpoint mtime should not have changed — timer is 1 hour, no kick from JobUpdate
+	afterStat, err := os.Stat(statePath)
+	require.NoError(t, err)
+	require.Equal(t, initMtime, afterStat.ModTime(), "checkpoint should not have been rewritten while jobs are in-flight with long CheckpointInterval")
+
+	// Release all jobs
+	gate.Unlock()
+
+	err = <-done
+	require.NoError(t, err)
+
+	for _, j := range r.Jobs {
+		require.Equal(t, STATE_DONE, j.State)
+	}
+
+	// Incremental file should exist before Close (jobs were appended)
+	incrementalPath := filepath.Join(dir, "state.incremental.jsonl")
+	_, err = os.Stat(incrementalPath)
+	require.NoError(t, err, "incremental JSONL should exist before Close")
+
+	// Close should write final checkpoint and clean up incremental files
+	require.NoError(t, ws.Close())
+
+	// Checkpoint should have been updated
+	finalStat, err := os.Stat(statePath)
+	require.NoError(t, err)
+	require.True(t, finalStat.ModTime().After(initMtime), "Close must write a final checkpoint")
+
+	// Sealed segments should be cleaned up
+	matches, _ := filepath.Glob(filepath.Join(dir, "state.incremental.sealed.*.jsonl"))
+	require.Empty(t, matches, "sealed segments should be removed after Close")
+
+	// Active incremental file may exist but should be empty (re-created by checkpoint)
+	info, err := os.Stat(incrementalPath)
+	if err == nil {
+		require.Equal(t, int64(0), info.Size(), "incremental JSONL should be empty after Close")
 	}
 }
 
@@ -1210,7 +1440,13 @@ func TestProcessor_NoRateLimiterStillWorks(t *testing.T) {
 		t.Fatalf("Exec failed: %v", err)
 	}
 
-	if r.Jobs["0"].State != "done" {
-		t.Errorf("Expected job to be in 'done' state, got '%s'", r.Jobs["0"].State)
+	require.Len(t, r.Jobs, 1)
+	var job Job[JC]
+	for _, j := range r.Jobs {
+		job = j
+		break
+	}
+	if job.State != "done" {
+		t.Errorf("Expected job to be in 'done' state, got '%s'", job.State)
 	}
 }

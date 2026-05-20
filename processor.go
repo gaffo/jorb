@@ -89,8 +89,7 @@ func newStateStorageFromStates[AC any, OC any, JC any](states []State[AC, OC, JC
 			State:    stateName,
 			Terminal: s.Terminal,
 		}
-		// This is by-design unbuffered
-		st.stateChan[stateName] = make(chan Job[JC])
+		st.stateChan[stateName] = make(chan Job[JC], s.Concurrency)
 	}
 
 	sort.Strings(st.sortedStateNames)
@@ -210,8 +209,6 @@ func (s stateStorage[AC, OC, JC]) getStatusCounts() []StatusCount {
 	return ret
 }
 
-// Serializer is an interface that defines how to serialize and deserialize job contexts.
-
 // Processor executes a job
 type Processor[AC any, OC any, JC any] struct {
 	appContext     AC
@@ -253,8 +250,7 @@ func (p *Processor[AC, OC, JC]) init() {
 		p.statusListener = &NilStatusListener{}
 	}
 
-	// This is by-design unbuffered
-	p.returnChan = make(chan Return[JC])
+	p.returnChan = make(chan Return[JC], 256)
 }
 
 // Exec this big work function, this does all the crunching
@@ -309,32 +305,22 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 		case <-ctx.Done():
 			return
 		case completedJob := <-p.returnChan:
-			// If the prior state of the completed job was at capacity, we now have space for one more
-			p.stateStorage.runNextWaitingJob(completedJob.PriorState)
+			needsStatusUpdate := p.handleReturn(r, completedJob)
 
-			// Update the run with the new state
-			r.UpdateJob(completedJob.Job)
-			p.stateStorage.processJob(completedJob.Job)
-
-			// Start any of the new jobs that need kicking
-			for idx, kickRequest := range completedJob.KickRequests {
-				job := Job[JC]{
-					Id:          fmt.Sprintf("%s->%d", completedJob.Job.Id, idx),
-					C:           kickRequest.C,
-					State:       kickRequest.State,
-					StateErrors: map[string][]string{},
+			// Drain buffered completions without blocking
+		drain:
+			for {
+				select {
+				case extra := <-p.returnChan:
+					if p.handleReturn(r, extra) {
+						needsStatusUpdate = true
+					}
+				default:
+					break drain
 				}
-				r.UpdateJob(job)
-				p.stateStorage.processJob(job)
 			}
 
-			if err := p.serializer.Serialize(*r); err != nil {
-				log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
-			}
-
-			// If we move a job back to the same state and there are no kick requests, no need to see a status
-			// update as the totals will be the same
-			if completedJob.PriorState != completedJob.Job.State || len(completedJob.KickRequests) > 0 {
+			if needsStatusUpdate {
 				p.updateStatus()
 			}
 
@@ -345,8 +331,52 @@ func (p *Processor[AC, OC, JC]) process(ctx context.Context, r *Run[OC, JC], wg 
 	}
 }
 
+func (p *Processor[AC, OC, JC]) handleReturn(r *Run[OC, JC], completedJob Return[JC]) bool {
+	p.stateStorage.runNextWaitingJob(completedJob.PriorState)
+
+	r.UpdateJob(completedJob.Job)
+	p.stateStorage.processJob(completedJob.Job)
+
+	for idx, kickRequest := range completedJob.KickRequests {
+		job := Job[JC]{
+			Id:          fmt.Sprintf("%s->%d", completedJob.Job.Id, idx),
+			C:           kickRequest.C,
+			State:       kickRequest.State,
+			StateErrors: map[string][]string{},
+		}
+		r.UpdateJob(job)
+		p.stateStorage.processJob(job)
+	}
+
+	if err := p.persistAfterCompletion(r, completedJob); err != nil {
+		log.Fatalf("Error serializing, aborting now to not lose work: %v", err)
+	}
+
+	return completedJob.PriorState != completedJob.Job.State || len(completedJob.KickRequests) > 0
+}
+
 func (p *Processor[AC, OC, JC]) updateStatus() {
 	p.statusListener.StatusUpdate(p.stateStorage.getStatusCounts())
+}
+
+// persistAfterCompletion appends one record per touched job; [JsonSerializer] schedules checkpoints internally after appends.
+func (p *Processor[AC, OC, JC]) persistAfterCompletion(r *Run[OC, JC], completed Return[JC]) error {
+	w := p.serializer
+	if err := w.JobUpdate(completed.Job); err != nil {
+		return err
+	}
+	for idx, kr := range completed.KickRequests {
+		kJob := Job[JC]{
+			Id:          fmt.Sprintf("%s->%d", completed.Job.Id, idx),
+			C:           kr.C,
+			State:       kr.State,
+			StateErrors: map[string][]string{},
+		}
+		if err := w.JobUpdate(kJob); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *Processor[AC, OC, JC]) shutdown() {
@@ -386,7 +416,7 @@ func (s *StateExec[AC, OC, JC]) Run() {
 				return
 			}
 
-			// Job is passed by value but StateErrors is a map: clone so we don't race Serialize reading r.Jobs.
+			// Job is passed by value but StateErrors is a map: clone so we don't race persistence reading r.Jobs.
 			j.StateErrors = cloneStateErrorsMap(j.StateErrors)
 
 			if s.state.RateLimit != nil {
