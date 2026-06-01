@@ -1693,11 +1693,45 @@ func TestTimeout_RecordsErrorOnTriggeringState(t *testing.T) {
 	assert.Contains(t, job.StateErrors[STATE_MIDDLE][0], "timed out after 50ms")
 }
 
+// TestTimeout_OnTerminalStateIsIgnored verifies that a Timeout set on a
+// terminal State is permitted at construction and never fires at runtime.
+// This supports flipping a state's Terminal flag during iterative development
+// without having to also strip its Timeout.
+func TestTimeout_OnTerminalStateIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	exec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		return jc, STATE_DONE, nil, nil
+	}
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{TriggerState: TRIGGER_STATE_NEW, Exec: exec, Concurrency: 1},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+			// Inert: STATE_DONE never invokes Exec, so the deadline can't fire.
+			Timeout: &Timeout{Duration: time.Nanosecond, FailState: TRIGGER_STATE_NEW},
+		},
+	}
+
+	r := NewRun[MyOverallContext, MyJobContext]("timeout-on-terminal", MyOverallContext{})
+	r.AddJob(MyJobContext{})
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	require.NoError(t, err, "Timeout on a terminal state must not be rejected at construction")
+	require.NoError(t, p.Exec(context.Background(), r))
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, STATE_DONE, j.State, "should have reached the terminal state normally")
+		assert.Empty(t, j.StateErrors[STATE_DONE], "no timeout entry should have been recorded against the terminal state")
+	}
+}
+
 // TestValidate_RejectsBadConfig confirms that NewProcessor refuses to construct
 // a state machine with a malformed State entry. Covers both pre-existing rules
 // (terminal+negative concurrency, non-terminal+concurrency<1, non-terminal with
 // nil Exec) and Timeout-specific rules (zero/negative Duration, missing or
-// unregistered FailState, Timeout declared on a terminal state).
+// unregistered FailState).
 func TestValidate_RejectsBadConfig(t *testing.T) {
 	noopExec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 		return jc, STATE_DONE, nil, nil
@@ -1765,14 +1799,6 @@ func TestValidate_RejectsBadConfig(t *testing.T) {
 				{TriggerState: STATE_DONE, Terminal: true},
 			},
 			want: `FailState "ghost" is not a registered state`,
-		},
-		{
-			name: "timeout on terminal state",
-			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
-				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 1},
-				{TriggerState: STATE_DONE, Terminal: true, Timeout: &Timeout{Duration: time.Second, FailState: TRIGGER_STATE_NEW}},
-			},
-			want: "terminal state done cannot define a Timeout",
 		},
 	}
 	for _, tc := range cases {

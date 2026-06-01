@@ -27,7 +27,9 @@ type RateLimiter interface {
 // applies per attempt; a state that re-enqueues itself for retry receives a
 // fresh window on each invocation. Outer cancellation of the Processor's
 // context propagates as the original error and does not get reclassified as a
-// timeout. A nil Timeout (default) disables the deadline. Set on State.Timeout.
+// timeout. A nil Timeout (default) disables the deadline. Setting Timeout on a
+// terminal State is permitted but inert: terminal states never invoke Exec, so
+// the deadline never fires. Set on State.Timeout.
 type Timeout struct {
 	// Duration is the deadline applied to each Exec call. Must be positive.
 	Duration time.Duration
@@ -141,9 +143,10 @@ func (s stateStorage[AC, OC, JC]) validate() error {
 			if state.Concurrency < 0 {
 				return fmt.Errorf("terminal state %s has negative concurrency", state.TriggerState)
 			}
-			if state.Timeout != nil {
-				return fmt.Errorf("terminal state %s cannot define a Timeout (no Exec runs)", state.TriggerState)
-			}
+			// Timeout on a terminal state is permitted but inert: terminal
+			// states never invoke Exec, so the deadline never fires. Allowed
+			// so callers can flip a state's Terminal flag during iteration
+			// without having to also strip its Timeout.
 		} else {
 			if state.Concurrency < 1 {
 				return fmt.Errorf("non-terminal state %s has non-positive concurrency", state.TriggerState)
