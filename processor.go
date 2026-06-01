@@ -112,7 +112,14 @@ func newStateStorageFromStates[AC any, OC any, JC any](states []State[AC, OC, JC
 			State:    stateName,
 			Terminal: s.Terminal,
 		}
-		st.stateChan[stateName] = make(chan Job[JC], s.Concurrency)
+		// Clamp the channel buffer to a non-negative size so a misconfigured
+		// State (negative Concurrency) doesn't panic make(chan, n) before the
+		// subsequent validate() pass surfaces the configuration error.
+		bufSize := s.Concurrency
+		if bufSize < 0 {
+			bufSize = 0
+		}
+		st.stateChan[stateName] = make(chan Job[JC], bufSize)
 	}
 
 	sort.Strings(st.sortedStateNames)
@@ -448,79 +455,115 @@ func (s *StateExec[AC, OC, JC]) Run() {
 		case <-s.ctx.Done():
 			return
 		case j, more := <-s.jobChan:
-			// The channel was closed
 			if !more {
 				return
 			}
-
-			// Job is passed by value but StateErrors is a map: clone so we don't race persistence reading r.Jobs.
-			j.StateErrors = cloneStateErrorsMap(j.StateErrors)
-
-			if s.state.RateLimit != nil {
-				s.state.RateLimit.Wait(s.ctx)
-				slog.Info("LimiterAllowed", "worker", s.i, "state", s.state.TriggerState, "job", j.Id)
-			}
-			priorState := j.State
-			// Execute the job
-			rtn := Return[JC]{
-				PriorState: priorState,
-			}
-			slog.Info("Executing job", "job", j.Id, "state", s.state.TriggerState)
-
-			// Apply per-attempt Timeout if configured. The cancel must fire
-			// regardless of whether the deadline elapsed, so it is scoped to a
-			// closure that runs once per job.
-			execCtx := s.ctx
-			var cancel context.CancelFunc
-			if s.state.Timeout != nil {
-				execCtx, cancel = context.WithTimeout(s.ctx, s.state.Timeout.Duration)
-			}
-			var err error
-			j.C, j.State, rtn.KickRequests, err = s.state.Exec(execCtx, s.ac, s.oc, j.C)
-			if cancel != nil {
-				cancel()
-			}
-
-			// Distinguish our deadline from outer cancellation: only reclassify
-			// when the parent context is still healthy. Otherwise the user
-			// killed the run and the original error should propagate.
-			timedOut := s.state.Timeout != nil && errors.Is(err, context.DeadlineExceeded) && s.ctx.Err() == nil
-			if timedOut {
-				j.StateErrors[priorState] = append(j.StateErrors[priorState],
-					fmt.Sprintf("timed out after %s", s.state.Timeout.Duration))
-				j.State = s.state.Timeout.FailState
-				err = nil
-				slog.Info("Execution timed out", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "duration", s.state.Timeout.Duration)
-			} else if err != nil {
-				j.StateErrors[priorState] = append(j.StateErrors[priorState], err.Error())
-
-				// Handle rate limit errors with backoff
-				if IsRateLimitError(err) {
-					if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
-						backoff.Backoff()
-					} else if s.state.RateLimit != nil {
-						slog.Debug("RateLimitError but RateLimit does not implement BackoffRateLimiter; adaptive backoff skipped",
-							"state", s.state.TriggerState)
-					}
-				}
-
-				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", err, "kickRequests", len(rtn.KickRequests))
-			} else {
-				// On success, increase rate if using adaptive rate limiter
-				if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
-					backoff.OnSuccess()
-				}
-				slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "kickRequests", len(rtn.KickRequests))
-			}
-
-			rtn.Job = j
-			slog.Info("Returning job", "job", j.Id, "newState", j.State)
+			rtn := s.executeOne(j)
+			slog.Info("Returning job", "job", rtn.Job.Id, "newState", rtn.Job.State)
 			if s.ctx.Err() != nil {
 				return
 			}
 			s.returnChan <- rtn
-			slog.Info("Returned job", "job", j.Id, "newState", j.State)
+			slog.Info("Returned job", "job", rtn.Job.Id, "newState", rtn.Job.State)
 		}
+	}
+}
+
+// executeOne handles one job end-to-end: rate-limit gate, deadline-wrapped
+// Exec, and result classification (timeout / error / success). The returned
+// Return is ready to send on the processor's return channel.
+func (s *StateExec[AC, OC, JC]) executeOne(j Job[JC]) Return[JC] {
+	// Job is passed by value but StateErrors is a map: clone so we don't race
+	// persistence reading r.Jobs.
+	j.StateErrors = cloneStateErrorsMap(j.StateErrors)
+
+	s.applyRateLimit(j.Id)
+
+	priorState := j.State
+	rtn := Return[JC]{PriorState: priorState}
+	slog.Info("Executing job", "job", j.Id, "state", s.state.TriggerState)
+
+	execCtx, cancel := s.deriveExecContext()
+	var err error
+	j.C, j.State, rtn.KickRequests, err = s.state.Exec(execCtx, s.ac, s.oc, j.C)
+	cancel()
+
+	s.classifyResult(&j, err, priorState, len(rtn.KickRequests))
+	rtn.Job = j
+	return rtn
+}
+
+// applyRateLimit blocks on the configured rate limiter, if any, until a token
+// is available. Logs the unblock event for traceability when a limiter is set.
+// No-op when RateLimit is nil.
+func (s *StateExec[AC, OC, JC]) applyRateLimit(jobID string) {
+	if s.state.RateLimit == nil {
+		return
+	}
+	s.state.RateLimit.Wait(s.ctx)
+	slog.Info("LimiterAllowed", "worker", s.i, "state", s.state.TriggerState, "job", jobID)
+}
+
+// deriveExecContext returns the context to pass to Exec along with a cancel
+// function the caller MUST call. When Timeout is configured the context carries
+// a deadline; otherwise the worker context is returned with a no-op cancel so
+// callers can always invoke cancel without a nil check.
+func (s *StateExec[AC, OC, JC]) deriveExecContext() (context.Context, context.CancelFunc) {
+	if s.state.Timeout == nil {
+		return s.ctx, func() {}
+	}
+	return context.WithTimeout(s.ctx, s.state.Timeout.Duration)
+}
+
+// classifyResult mutates j in place based on the outcome of Exec: a deadline
+// expiry triggers a Timeout-driven transition to FailState, a generic error is
+// recorded against priorState (with optional AIMD backoff), and a success
+// triggers AIMD additive-increase. priorState is the state Exec was invoked
+// from; kickCount is included in slog metadata.
+func (s *StateExec[AC, OC, JC]) classifyResult(j *Job[JC], err error, priorState string, kickCount int) {
+	// Distinguish our deadline from outer cancellation: only reclassify when
+	// the parent context is still healthy. Otherwise the user killed the run
+	// and the original error should propagate.
+	if s.state.Timeout != nil && errors.Is(err, context.DeadlineExceeded) && s.ctx.Err() == nil {
+		j.StateErrors[priorState] = append(j.StateErrors[priorState],
+			fmt.Sprintf("timed out after %s", s.state.Timeout.Duration))
+		j.State = s.state.Timeout.FailState
+		slog.Info("Execution timed out", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "duration", s.state.Timeout.Duration)
+		return
+	}
+	if err != nil {
+		j.StateErrors[priorState] = append(j.StateErrors[priorState], err.Error())
+		s.applyRateLimitErrorBackoff(err)
+		slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "error", err, "kickRequests", kickCount)
+		return
+	}
+	s.applyRateLimitSuccess()
+	slog.Info("Execution complete", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "kickRequests", kickCount)
+}
+
+// applyRateLimitErrorBackoff applies an AIMD multiplicative-decrease step when
+// err is a RateLimitError and the configured limiter implements
+// BackoffRateLimiter. When a RateLimitError surfaces against a non-adaptive
+// limiter the signal is logged at debug since it has no actionable target.
+func (s *StateExec[AC, OC, JC]) applyRateLimitErrorBackoff(err error) {
+	if !IsRateLimitError(err) {
+		return
+	}
+	if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
+		backoff.Backoff()
+		return
+	}
+	if s.state.RateLimit != nil {
+		slog.Debug("RateLimitError but RateLimit does not implement BackoffRateLimiter; adaptive backoff skipped",
+			"state", s.state.TriggerState)
+	}
+}
+
+// applyRateLimitSuccess applies an AIMD additive-increase step on a successful
+// Exec when the limiter is adaptive. No-op for non-adaptive or absent limiters.
+func (s *StateExec[AC, OC, JC]) applyRateLimitSuccess() {
+	if backoff, ok := s.state.RateLimit.(BackoffRateLimiter); ok {
+		backoff.OnSuccess()
 	}
 }
 

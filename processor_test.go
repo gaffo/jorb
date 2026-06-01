@@ -1634,11 +1634,71 @@ func TestTimeout_RetryGetsFreshWindow(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestTimeout_ValidationRejectsBadConfig confirms that NewProcessor refuses to
-// construct a state machine with a malformed Timeout: zero/negative duration,
-// missing FailState, FailState referencing an unregistered state, or Timeout
-// declared on a terminal state.
-func TestTimeout_ValidationRejectsBadConfig(t *testing.T) {
+// TestTimeout_RecordsErrorOnTriggeringState verifies that when Timeout fires
+// from a non-NEW state, the "timed out after" entry is appended to
+// StateErrors keyed on the *triggering* state, not always TRIGGER_STATE_NEW.
+// The pipeline routes NEW → STATE_MIDDLE (Timeout fires here) → STATE_DONE_TWO.
+func TestTimeout_RecordsErrorOnTriggeringState(t *testing.T) {
+	t.Parallel()
+
+	// First state hops the job into STATE_MIDDLE without exhausting any deadline.
+	hop := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		return jc, STATE_MIDDLE, nil, nil
+	}
+	// Middle state holds the Timeout and runs slow enough to trip it.
+	slow := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		select {
+		case <-time.After(2 * time.Second):
+			return jc, STATE_DONE, nil, nil
+		case <-ctx.Done():
+			return jc, "", nil, ctx.Err()
+		}
+	}
+
+	states := []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{TriggerState: TRIGGER_STATE_NEW, Exec: hop, Concurrency: 1},
+		{
+			TriggerState: STATE_MIDDLE,
+			Exec:         slow,
+			Concurrency:  1,
+			Timeout: &Timeout{
+				Duration:  50 * time.Millisecond,
+				FailState: STATE_DONE_TWO,
+			},
+		},
+		{TriggerState: STATE_DONE, Terminal: true},
+		{TriggerState: STATE_DONE_TWO, Terminal: true},
+	}
+
+	r := NewRun[MyOverallContext, MyJobContext]("timeout-records-on-triggering-state", MyOverallContext{})
+	r.AddJob(MyJobContext{})
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, p.Exec(context.Background(), r))
+
+	require.Len(t, r.Jobs, 1)
+	var job Job[MyJobContext]
+	for _, j := range r.Jobs {
+		job = j
+	}
+	assert.Equal(t, STATE_DONE_TWO, job.State, "should land in FailState after timing out at STATE_MIDDLE")
+
+	// The timeout entry must be keyed on the actual triggering state (MIDDLE),
+	// not TRIGGER_STATE_NEW.
+	assert.Empty(t, job.StateErrors[TRIGGER_STATE_NEW],
+		"NEW transitioned cleanly; should have no error entries")
+	require.Len(t, job.StateErrors[STATE_MIDDLE], 1,
+		"timeout error should be recorded against the state that triggered Exec")
+	assert.Contains(t, job.StateErrors[STATE_MIDDLE][0], "timed out after 50ms")
+}
+
+// TestValidate_RejectsBadConfig confirms that NewProcessor refuses to construct
+// a state machine with a malformed State entry. Covers both pre-existing rules
+// (terminal+negative concurrency, non-terminal+concurrency<1, non-terminal with
+// nil Exec) and Timeout-specific rules (zero/negative Duration, missing or
+// unregistered FailState, Timeout declared on a terminal state).
+func TestValidate_RejectsBadConfig(t *testing.T) {
 	noopExec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
 		return jc, STATE_DONE, nil, nil
 	}
@@ -1648,6 +1708,32 @@ func TestTimeout_ValidationRejectsBadConfig(t *testing.T) {
 		states []State[MyAppContext, MyOverallContext, MyJobContext]
 		want   string
 	}{
+		// --- pre-existing State invariants ---
+		{
+			name: "terminal state with negative concurrency",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 1},
+				{TriggerState: STATE_DONE, Terminal: true, Concurrency: -1},
+			},
+			want: "terminal state done has negative concurrency",
+		},
+		{
+			name: "non-terminal state with zero concurrency",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 0},
+				{TriggerState: STATE_DONE, Terminal: true},
+			},
+			want: "non-terminal state new has non-positive concurrency",
+		},
+		{
+			name: "non-terminal state with nil Exec",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: nil, Concurrency: 1},
+				{TriggerState: STATE_DONE, Terminal: true},
+			},
+			want: "non-terminal state new but has no Exec function",
+		},
+		// --- Timeout-specific rules ---
 		{
 			name: "zero duration",
 			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
