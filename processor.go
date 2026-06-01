@@ -2,12 +2,14 @@ package jorb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"runtime/pprof"
 	"sort"
 	"sync"
+	"time"
 )
 
 const (
@@ -17,6 +19,21 @@ const (
 // RateLimiter is an interface for rate limiting
 type RateLimiter interface {
 	Wait(ctx context.Context) error
+}
+
+// Timeout caps the wall-clock duration of a single Exec invocation for a State.
+// When the deadline expires the worker routes the job to FailState and records
+// a "timed out after <duration>" entry in the job's StateErrors. The timeout
+// applies per attempt; a state that re-enqueues itself for retry receives a
+// fresh window on each invocation. Outer cancellation of the Processor's
+// context propagates as the original error and does not get reclassified as a
+// timeout. A nil Timeout (default) disables the deadline. Set on State.Timeout.
+type Timeout struct {
+	// Duration is the deadline applied to each Exec call. Must be positive.
+	Duration time.Duration
+	// FailState is the state to transition the job into when the deadline
+	// expires. Must be a registered state in the Processor's state set.
+	FailState string
 }
 
 // State represents a state in a state machine for job processing.
@@ -41,6 +58,12 @@ type State[AC any, OC any, JC any] struct {
 
 	// RateLimit is an optional rate limiter for controlling the execution rate of this state. Useful when calling rate limited apis.
 	RateLimit RateLimiter
+
+	// Timeout optionally bounds how long a single Exec invocation may run.
+	// When nil (default) Exec runs without a deadline. When non-nil the
+	// processor wraps the per-job context with WithTimeout(Duration) and
+	// routes the job to FailState if the deadline expires. See [Timeout].
+	Timeout *Timeout
 }
 
 // KickRequest struct is a job context with a requested state that the
@@ -111,12 +134,26 @@ func (s stateStorage[AC, OC, JC]) validate() error {
 			if state.Concurrency < 0 {
 				return fmt.Errorf("terminal state %s has negative concurrency", state.TriggerState)
 			}
+			if state.Timeout != nil {
+				return fmt.Errorf("terminal state %s cannot define a Timeout (no Exec runs)", state.TriggerState)
+			}
 		} else {
 			if state.Concurrency < 1 {
 				return fmt.Errorf("non-terminal state %s has non-positive concurrency", state.TriggerState)
 			}
 			if state.Exec == nil {
 				return fmt.Errorf("non-terminal state %s but has no Exec function", state.TriggerState)
+			}
+		}
+		if state.Timeout != nil {
+			if state.Timeout.Duration <= 0 {
+				return fmt.Errorf("state %s: Timeout.Duration must be positive, got %s", state.TriggerState, state.Timeout.Duration)
+			}
+			if state.Timeout.FailState == "" {
+				return fmt.Errorf("state %s: Timeout requires a FailState", state.TriggerState)
+			}
+			if _, ok := s.stateMap[state.Timeout.FailState]; !ok {
+				return fmt.Errorf("state %s: Timeout.FailState %q is not a registered state", state.TriggerState, state.Timeout.FailState)
 			}
 		}
 	}
@@ -429,9 +466,32 @@ func (s *StateExec[AC, OC, JC]) Run() {
 				PriorState: priorState,
 			}
 			slog.Info("Executing job", "job", j.Id, "state", s.state.TriggerState)
+
+			// Apply per-attempt Timeout if configured. The cancel must fire
+			// regardless of whether the deadline elapsed, so it is scoped to a
+			// closure that runs once per job.
+			execCtx := s.ctx
+			var cancel context.CancelFunc
+			if s.state.Timeout != nil {
+				execCtx, cancel = context.WithTimeout(s.ctx, s.state.Timeout.Duration)
+			}
 			var err error
-			j.C, j.State, rtn.KickRequests, err = s.state.Exec(s.ctx, s.ac, s.oc, j.C)
-			if err != nil {
+			j.C, j.State, rtn.KickRequests, err = s.state.Exec(execCtx, s.ac, s.oc, j.C)
+			if cancel != nil {
+				cancel()
+			}
+
+			// Distinguish our deadline from outer cancellation: only reclassify
+			// when the parent context is still healthy. Otherwise the user
+			// killed the run and the original error should propagate.
+			timedOut := s.state.Timeout != nil && errors.Is(err, context.DeadlineExceeded) && s.ctx.Err() == nil
+			if timedOut {
+				j.StateErrors[priorState] = append(j.StateErrors[priorState],
+					fmt.Sprintf("timed out after %s", s.state.Timeout.Duration))
+				j.State = s.state.Timeout.FailState
+				err = nil
+				slog.Info("Execution timed out", "job", j.Id, "state", s.state.TriggerState, "newState", j.State, "duration", s.state.Timeout.Duration)
+			} else if err != nil {
 				j.StateErrors[priorState] = append(j.StateErrors[priorState], err.Error())
 
 				// Handle rate limit errors with backoff

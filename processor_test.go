@@ -1444,3 +1444,257 @@ func TestProcessor_NoRateLimiterStillWorks(t *testing.T) {
 		t.Errorf("Expected job to be in 'done' state, got '%s'", job.State)
 	}
 }
+
+// --- Timeout tests ---
+
+// timeoutTestStates returns a minimal three-state set used by the timeout tests:
+// a starting state that runs exec, a configurable fail state, and a done state.
+func timeoutTestStates(exec func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error), timeout *Timeout) []State[MyAppContext, MyOverallContext, MyJobContext] {
+	return []State[MyAppContext, MyOverallContext, MyJobContext]{
+		{
+			TriggerState: TRIGGER_STATE_NEW,
+			Exec:         exec,
+			Concurrency:  1,
+			Timeout:      timeout,
+		},
+		{
+			TriggerState: STATE_DONE,
+			Terminal:     true,
+		},
+		{
+			TriggerState: STATE_DONE_TWO,
+			Terminal:     true,
+		},
+	}
+}
+
+// TestTimeout_FiresAndRoutesToFailState verifies that an Exec that exceeds the
+// configured Timeout.Duration is interrupted, the job lands in FailState, and
+// a "timed out after" entry is recorded in StateErrors. The driver respects
+// ctx so the deadline returns promptly rather than running the full sleep.
+func TestTimeout_FiresAndRoutesToFailState(t *testing.T) {
+	t.Parallel()
+
+	exec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		select {
+		case <-time.After(2 * time.Second):
+			return jc, STATE_DONE, nil, nil
+		case <-ctx.Done():
+			return jc, "", nil, ctx.Err()
+		}
+	}
+	states := timeoutTestStates(exec, &Timeout{
+		Duration:  50 * time.Millisecond,
+		FailState: STATE_DONE_TWO,
+	})
+
+	r := NewRun[MyOverallContext, MyJobContext]("timeout-fires", MyOverallContext{})
+	r.AddJob(MyJobContext{})
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	require.NoError(t, err)
+
+	start := time.Now()
+	require.NoError(t, p.Exec(context.Background(), r))
+	elapsed := time.Since(start)
+
+	require.Len(t, r.Jobs, 1)
+	var job Job[MyJobContext]
+	for _, j := range r.Jobs {
+		job = j
+	}
+	assert.Equal(t, STATE_DONE_TWO, job.State, "should land in configured FailState, not the success target")
+	require.Len(t, job.StateErrors[TRIGGER_STATE_NEW], 1)
+	assert.Contains(t, job.StateErrors[TRIGGER_STATE_NEW][0], "timed out after 50ms")
+	assert.Less(t, elapsed, time.Second, "should fail well before the 2s sleep completes")
+}
+
+// TestTimeout_NotExceededRunsToCompletion verifies that an Exec finishing
+// before the deadline still completes normally and is not misclassified.
+func TestTimeout_NotExceededRunsToCompletion(t *testing.T) {
+	t.Parallel()
+
+	exec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		return jc, STATE_DONE, nil, nil
+	}
+	states := timeoutTestStates(exec, &Timeout{
+		Duration:  5 * time.Second,
+		FailState: STATE_DONE_TWO,
+	})
+
+	r := NewRun[MyOverallContext, MyJobContext]("timeout-no-fire", MyOverallContext{})
+	r.AddJob(MyJobContext{})
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, p.Exec(context.Background(), r))
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, STATE_DONE, j.State)
+		assert.Empty(t, j.StateErrors[TRIGGER_STATE_NEW])
+	}
+}
+
+// TestTimeout_ParentCancelDoesNotMasquerade verifies that cancelling the outer
+// context returned from p.Exec does not surface as a "timed out" classification.
+// The deadline disambiguation in the worker requires the parent ctx to still be
+// healthy at the moment DeadlineExceeded is observed; otherwise the original
+// error must propagate.
+func TestTimeout_ParentCancelDoesNotMasquerade(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	exec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		close(started)
+		select {
+		case <-time.After(5 * time.Second):
+			return jc, STATE_DONE, nil, nil
+		case <-ctx.Done():
+			return jc, "", nil, ctx.Err()
+		}
+	}
+	// A long Timeout so the parent cancel races first.
+	states := timeoutTestStates(exec, &Timeout{
+		Duration:  10 * time.Second,
+		FailState: STATE_DONE_TWO,
+	})
+
+	r := NewRun[MyOverallContext, MyJobContext]("timeout-parent-cancel", MyOverallContext{})
+	r.AddJob(MyJobContext{})
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	require.NoError(t, err)
+	// Exec returns the parent ctx error when cancelled mid-run.
+	execErr := p.Exec(parentCtx, r)
+	assert.ErrorIs(t, execErr, context.Canceled)
+
+	// The error logged on the job (if any) must be the original ctx.Canceled,
+	// not a "timed out" reclassification. The worker may also exit before
+	// updating the run, in which case the job stays in TRIGGER_STATE_NEW.
+	for _, j := range r.Jobs {
+		for _, msg := range j.StateErrors[TRIGGER_STATE_NEW] {
+			assert.NotContains(t, msg, "timed out after",
+				"parent cancellation must not surface as a timeout: %q", msg)
+		}
+	}
+}
+
+// TestTimeout_RetryGetsFreshWindow verifies that a state which re-enqueues
+// itself receives a fresh deadline on each attempt. A job that fails three
+// half-deadline attempts and succeeds on the fourth must complete cleanly:
+// each attempt observes the full Timeout.Duration, not a shared one.
+func TestTimeout_RetryGetsFreshWindow(t *testing.T) {
+	t.Parallel()
+
+	const timeout = 200 * time.Millisecond
+	const halfTimeout = timeout / 2
+
+	var mu sync.Mutex
+	attempts := 0
+	exec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		// First three attempts sleep half the deadline (well within budget) and
+		// re-enqueue with an error; the fourth completes.
+		select {
+		case <-time.After(halfTimeout):
+		case <-ctx.Done():
+			return jc, "", nil, ctx.Err()
+		}
+		if n < 4 {
+			return jc, TRIGGER_STATE_NEW, nil, fmt.Errorf("retry %d", n)
+		}
+		return jc, STATE_DONE, nil, nil
+	}
+	states := timeoutTestStates(exec, &Timeout{
+		Duration:  timeout,
+		FailState: STATE_DONE_TWO,
+	})
+
+	r := NewRun[MyOverallContext, MyJobContext]("timeout-fresh-window", MyOverallContext{})
+	r.AddJob(MyJobContext{})
+
+	p, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, states, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, p.Exec(context.Background(), r))
+
+	for _, j := range r.Jobs {
+		assert.Equal(t, STATE_DONE, j.State, "fresh deadline per attempt should let retries succeed")
+	}
+	mu.Lock()
+	assert.Equal(t, 4, attempts)
+	mu.Unlock()
+}
+
+// TestTimeout_ValidationRejectsBadConfig confirms that NewProcessor refuses to
+// construct a state machine with a malformed Timeout: zero/negative duration,
+// missing FailState, FailState referencing an unregistered state, or Timeout
+// declared on a terminal state.
+func TestTimeout_ValidationRejectsBadConfig(t *testing.T) {
+	noopExec := func(ctx context.Context, ac MyAppContext, oc MyOverallContext, jc MyJobContext) (MyJobContext, string, []KickRequest[MyJobContext], error) {
+		return jc, STATE_DONE, nil, nil
+	}
+
+	cases := []struct {
+		name   string
+		states []State[MyAppContext, MyOverallContext, MyJobContext]
+		want   string
+	}{
+		{
+			name: "zero duration",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 1, Timeout: &Timeout{Duration: 0, FailState: STATE_DONE}},
+				{TriggerState: STATE_DONE, Terminal: true},
+			},
+			want: "Timeout.Duration must be positive",
+		},
+		{
+			name: "negative duration",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 1, Timeout: &Timeout{Duration: -time.Second, FailState: STATE_DONE}},
+				{TriggerState: STATE_DONE, Terminal: true},
+			},
+			want: "Timeout.Duration must be positive",
+		},
+		{
+			name: "missing fail state",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 1, Timeout: &Timeout{Duration: time.Second, FailState: ""}},
+				{TriggerState: STATE_DONE, Terminal: true},
+			},
+			want: "Timeout requires a FailState",
+		},
+		{
+			name: "fail state not registered",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 1, Timeout: &Timeout{Duration: time.Second, FailState: "ghost"}},
+				{TriggerState: STATE_DONE, Terminal: true},
+			},
+			want: `FailState "ghost" is not a registered state`,
+		},
+		{
+			name: "timeout on terminal state",
+			states: []State[MyAppContext, MyOverallContext, MyJobContext]{
+				{TriggerState: TRIGGER_STATE_NEW, Exec: noopExec, Concurrency: 1},
+				{TriggerState: STATE_DONE, Terminal: true, Timeout: &Timeout{Duration: time.Second, FailState: TRIGGER_STATE_NEW}},
+			},
+			want: "terminal state done cannot define a Timeout",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewProcessor[MyAppContext, MyOverallContext, MyJobContext](MyAppContext{}, tc.states, nil, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}

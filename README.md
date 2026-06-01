@@ -71,6 +71,30 @@ The rate limiter automatically:
 - Increases on success (+1 per increase interval while under max)
 - Stays within configured min/max bounds (initial/min/max are normalized, including `min > max` and non-positive inputs)
 
+## Per-State Timeout
+
+Set `State.Timeout` to bound how long a single `Exec` invocation may run. When the deadline expires the worker routes the job to a configured `FailState` and records a `"timed out after <duration>"` entry in the job's `StateErrors`. The timeout applies per attempt, so a state that re-enqueues itself for retry receives a fresh window each time:
+
+```go
+states := []jorb.State[AC, OC, JC]{
+    {
+        TriggerState: "fetch",
+        Exec:         fetch,
+        Concurrency:  10,
+        Timeout: &jorb.Timeout{
+            Duration:  30 * time.Second,
+            FailState: "fetch-failed",
+        },
+    },
+    {TriggerState: "fetch-failed", Terminal: true},
+    {TriggerState: "done", Terminal: true},
+}
+```
+
+A nil `Timeout` (the default) disables the deadline. `NewProcessor` rejects misconfigured timeouts at construction: zero/negative `Duration`, missing `FailState`, a `FailState` that is not in the registered state set, or a `Timeout` declared on a terminal state.
+
+Outer cancellation of the context passed to `Processor.Exec` (for example, a Ctrl-C of the host process) is **not** reclassified as a timeout. The worker only routes to `FailState` when its own deadline elapses and the parent context is still healthy; otherwise the original error propagates so callers can distinguish operator-driven shutdown from a stuck job.
+
 # Concepts
 
 When making a program you basically need the following: AC, OC, JC, Job, Run, States, StatusListener, persistence (`JsonSerializer` or `NilSerializer`), and a Processor
@@ -115,6 +139,7 @@ A State is a description of a possible state that a job can be in, a state has:
 is terminal to patch up workflows or to stop certain actions (I turn terminal off in off hours so I don't send actual CRs, just all the pre-validation). flag.Bool works great for this.
 * Concurrency: the number of concurrent procesors for this state, this is nice if the steps take a while esp on network calls
 * RateLimit: a rate.Limit that is shared by all processors for this state, great if you are hitting a rate limited api
+* Timeout: an optional `*Timeout` that bounds how long a single Exec invocation may run; on expiry the job routes to the configured FailState (see [Per-State Timeout](#per-state-timeout))
 
 Typically you want to be pretty granular with your steps. For instance in a recent workflow I have seperate states for:
 * File modification
