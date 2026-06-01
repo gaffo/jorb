@@ -114,9 +114,6 @@ func newStateStorageFromStates[AC any, OC any, JC any](states []State[AC, OC, JC
 			State:    stateName,
 			Terminal: s.Terminal,
 		}
-		// Clamp the channel buffer to a non-negative size so a misconfigured
-		// State (negative Concurrency) doesn't panic make(chan, n) before the
-		// subsequent validate() pass surfaces the configuration error.
 		bufSize := s.Concurrency
 		if bufSize < 0 {
 			bufSize = 0
@@ -143,10 +140,6 @@ func (s stateStorage[AC, OC, JC]) validate() error {
 			if state.Concurrency < 0 {
 				return fmt.Errorf("terminal state %s has negative concurrency", state.TriggerState)
 			}
-			// Timeout on a terminal state is permitted but inert: terminal
-			// states never invoke Exec, so the deadline never fires. Allowed
-			// so callers can flip a state's Terminal flag during iteration
-			// without having to also strip its Timeout.
 		} else {
 			if state.Concurrency < 1 {
 				return fmt.Errorf("non-terminal state %s has non-positive concurrency", state.TriggerState)
